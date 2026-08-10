@@ -36,8 +36,22 @@ async function main() {
   console.log(`[autopilot] starting, pairs=[${pairSummary}] runMode=${existingMode} tickMs=${TICK_MS}`);
 
   const state: ServerState = { lastTickAt: null, lastResults: [], tickMs: TICK_MS };
+  // Guards against overlapping tick() executions - without this, the
+  // automatic startup tick (below) and a manual "Run decision now" click
+  // (or the setInterval tick firing while a slow candle-fetch/order-placement
+  // tick is still in flight) can run concurrently. Both would read the same
+  // stale allocation_state row before either's write commits, defeating the
+  // per-pair fractionChanged idempotency check in loop.ts and executing the
+  // same entry/resize twice - observed in practice as a pair's NAV getting
+  // funded twice over.
+  let tickInProgress = false;
 
   const tick = async () => {
+    if (tickInProgress) {
+      console.log("[autopilot] tick already in progress, skipping overlapping run");
+      return;
+    }
+    tickInProgress = true;
     try {
       // Run mode is live-editable (design doc: "no rebuild to tune") - re-read
       // it every tick and rebuild the client so it reflects the current mode
@@ -62,6 +76,8 @@ async function main() {
       state.lastResults = results;
     } catch (err) {
       console.error("[autopilot] tick failed:", err);
+    } finally {
+      tickInProgress = false;
     }
   };
 

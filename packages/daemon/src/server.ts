@@ -124,11 +124,18 @@ export async function createServer(opts: CreateServerOptions) {
 
   fastify.put("/api/secrets/bitfinex", async (req, reply) => {
     const body = req.body as { apiKey?: string; apiSecret?: string } | undefined;
-    if (!body?.apiKey || !body?.apiSecret) {
+    // Trim before validating and storing - a trailing newline or leading/trailing
+    // space from copy-paste is invisible in the input field but breaks the
+    // HMAC signature on every request, surfacing as Bitfinex's opaque
+    // "apikey: digest invalid" error with no indication the secret itself
+    // is the problem.
+    const apiKey = body?.apiKey?.trim();
+    const apiSecret = body?.apiSecret?.trim();
+    if (!apiKey || !apiSecret) {
       reply.code(400);
       return { error: "apiKey and apiSecret are both required" };
     }
-    writeBitfinexSecrets(opts.dbPath, { apiKey: body.apiKey, apiSecret: body.apiSecret });
+    writeBitfinexSecrets(opts.dbPath, { apiKey, apiSecret });
     console.log("[autopilot] Bitfinex API credentials updated via dashboard - restart the daemon to pick them up.");
     return { configured: true, note: "Restart the daemon for the new credentials to take effect." };
   });
