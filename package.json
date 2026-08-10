@@ -1,0 +1,32 @@
+{
+  "name": "btc-xaut-autopilot",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Spot-only, long/flat BTC/XAUT swing-trading daemon + dashboard on Bitfinex. Objective: maximize BTC-denominated yield.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:packages": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck:packages": "npm run typecheck --workspaces --if-present",
+    "backtest": "npm run start --workspace packages/backtest",
+    "backtest:inspect": "npm run inspect --workspace packages/backtest",
+    "check": "tsc --noEmit",
+    "build": "rm -rf ./javascript && ncc build startos/index.ts -o ./javascript",
+    "prettier": "prettier --write startos"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4",
+    "@types/node": "^22.19.0",
+    "@vercel/ncc": "^0.38.4",
+    "prettier": "^3.6.2"
+  },
+  "dependencies": {
+    "@start9labs/start-sdk": "^1.5.3"
+  }
+}
