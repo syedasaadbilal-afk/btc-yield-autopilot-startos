@@ -52,7 +52,7 @@ describe("cross-pair allocation resize + NAV mark-to-market", () => {
     repo.setRunMode("PAPER");
   });
 
-  it("resizes both pairs to 50/50 on first tick once both regimes are gold (orange/flat), stamping allocation_state", async () => {
+  it("does not resize between two held gold positions on first tick even when both regimes are gold (orange/flat) - only stamps allocation_state as the baseline", async () => {
     const client = fundedFakeClient(orangeFlatCloses(102));
     const results = await runControlLoopIteration({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
 
@@ -60,7 +60,7 @@ describe("cross-pair allocation resize + NAV mark-to-market", () => {
       expect(result.currentPosition).toBe("flat");
       expect(result.decisionTarget).toBe("flat");
       expect(result.targetFraction).toBeCloseTo(0.5);
-      expect(result.rotated).toBe(true); // resize from "unset" -> 50% fired
+      expect(result.rotated).toBe(false); // dual-gold: never resize between held positions, only stamp allocation_state
     }
     expect(repo.getAllocationFraction("xaut")).toBeCloseTo(0.5);
     expect(repo.getAllocationFraction("xmr")).toBeCloseTo(0.5);

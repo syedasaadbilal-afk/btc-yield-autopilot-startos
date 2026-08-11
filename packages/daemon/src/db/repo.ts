@@ -166,6 +166,19 @@ export class Repo {
     return row?.closed_at;
   }
 
+  /**
+   * True if this pair has ever had a trade opened while run mode was LIVE.
+   * Used by loop.ts's needsLiveBootstrapCheck to tell a genuinely-filled LIVE
+   * position apart from a DRY_RUN/PAPER simulation that never actually
+   * reached the exchange but was written into the same trades table.
+   */
+  hasLiveTrade(pairKey: string = DEFAULT_PAIR_KEY): boolean {
+    const row = this.db
+      .prepare("SELECT 1 FROM trades WHERE pair_key = ? AND run_mode = 'LIVE' LIMIT 1")
+      .get(pairKey);
+    return row !== undefined;
+  }
+
   // ---- nav ----
 
   insertNavPoint(nav: NavPoint): void {

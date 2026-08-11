@@ -40,6 +40,7 @@ export function PairPanel({
   color: string;
 }) {
   const heldAsset = status.currentPosition === "long" ? "BTC" : status.displayName.split(" ")[0];
+  const decisionTargetLabel = status.decisionTarget === "long" ? "BTC" : status.displayName.split(" ")[0];
   const pairStartingBtc = totalStartingBtc * status.capitalFractionBtc;
   const isRebalancing = status.decisionTarget !== status.currentPosition;
 
@@ -63,7 +64,7 @@ export function PairPanel({
         )}
         <Row
           label="decision target"
-          value={status.decisionTarget}
+          value={decisionTargetLabel}
           valueClass={isRebalancing ? "text-amber-400" : "text-slate-200"}
         />
         {isRebalancing && (
