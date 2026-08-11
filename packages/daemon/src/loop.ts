@@ -276,15 +276,17 @@ async function computeWalletBasis(
 
 /**
  * gate + execute + persist for one pair. Handles:
- *   1. A flat<->long flip (this pair's own Larsson decision changed) - sized
- *      against the dynamic target fraction on entry, against this pair's
- *      real wallet-derived current value on exit.
- *   2a. Both pairs are gold (isDualGoldState) - never resize/rebalance
- *       BETWEEN the two held gold positions just because the allocator's
- *       50/50 target flickered; only deploy pre-assigned idle/top-up BTC
- *       (new money) into this pair if it's the underrepresented one.
- *   2b. Not dual-gold, still flat, no flip - a REAL reallocation (the other
- *       pair left gold and freed up capital for this one, or vice versa).
+ *   1. A flat<->long flip (this pair's own Larsson decision changed).
+ *   2a. Still flat, no flip, target fraction CHANGED since last established
+ *       (repo.getAllocationFraction) - a REAL reallocation. Fires on every
+ *       regime-driven transition: 100% splitting into 50/50, 50/50
+ *       collapsing back to 100%, moving between the two single-gold 100/0
+ *       states, or this pair's first-ever allocation. Sized against this
+ *       pair's real wallet-derived current value.
+ *   2b. Still flat, no flip, target fraction UNCHANGED (a stable 50/50 or a
+ *       stable 100/0 state) - never resize an existing held position off
+ *       allocator noise; only ever deploy pre-assigned idle/top-up BTC (new
+ *       money) into this pair if it's the one that should receive it.
  *   3. Neither - just mark-to-market and persist a NAV point.
  */
 async function gateAndExecute(
@@ -358,55 +360,15 @@ async function gateAndExecute(
     const fractionChanged =
       lastAppliedFraction === undefined || Math.abs(lastAppliedFraction - targetFraction) > 1e-9;
 
-    if (isDualGoldState) {
-      // Case 2a: both XAUT and XMR are gold this tick. Never resize/rebalance
-      // BETWEEN two already-held gold positions just because the allocator's
-      // 50/50 target flickered - hold both positions exactly as-is until one
-      // of them actually leaves gold (handled entirely by Case 1 above, on
-      // whichever later tick that happens). Still record the fraction so it
-      // isn't seen as "stale" once a real exit does happen.
-      if (fractionChanged) {
-        repo.setAllocationFraction(pair.key, targetFraction);
-      }
-
-      // Fresh/idle capital handling: idleTopUpBtc is pre-computed once per
-      // tick in runControlLoopIteration by comparing both pairs' real
-      // wallet-derived values, so only the actually-underrepresented pair
-      // ever receives it. This only ever BUYS more of this pair's asset with
-      // money that wasn't invested anywhere yet - never sells either pair's
-      // existing holding.
-      if (idleTopUpBtc > 0) {
-        if (runMode === "PAUSED") {
-          console.log(
-            `[${pair.key}] skipping idle-capital top-up of ${idleTopUpBtc.toFixed(8)} BTC: run mode is PAUSED (treated the same as a fresh entry).`
-          );
-        } else {
-          console.log(
-            `[${pair.key}] deploying idle/top-up capital: ${idleTopUpBtc.toFixed(8)} BTC into ${pair.assetCurrency} (underrepresented side of the 50/50 gold split).`
-          );
-          const executeResult = await executeRotation({
-            client,
-            side: "sell_btc_for_xaut",
-            btcCapital: idleTopUpBtc,
-            pair,
-            config,
-          });
-          for (const rd of executeResult.routeDecisions) {
-            console.log(
-              `[${pair.key}] top-up tranche ${rd.trancheIndex} routed via "${rd.route}" (direct ${rd.directSlippageBtc.toFixed(6)} BTC vs usdt ${rd.usdtSlippageBtc.toFixed(6)} BTC estimated slippage)`
-            );
-          }
-          rotated = true;
-          executedBtcCapital = idleTopUpBtc;
-          executedDirection = "into_asset";
-        }
-      }
-    } else if (fractionChanged) {
-      // Case 2b: not a dual-gold state - a REAL reallocation (the other pair
-      // just exited to BTC and freed up capital that belongs to this
-      // still-gold pair). Compare against the last-APPLIED fraction, and
-      // size the delta against this pair's real wallet-derived current
-      // value so it's correct regardless of funding history.
+    if (fractionChanged) {
+      // Case 2a: a REAL reallocation. Fires on ANY change to this pair's
+      // target fraction - the first-ever allocation for this pair, a 100%
+      // regime splitting into the 50/50 dual-gold state, 50/50 collapsing
+      // back into a 100% regime, or moving between the two single-gold
+      // 100/0 states. isDualGoldState is not used to gate this anymore - it
+      // is purely informational in the log line below - since a target that
+      // just changed must be traded into regardless of whether the new (or
+      // old) state happens to be dual-gold.
       const targetBtc = totalPortfolioBtc * targetFraction;
       const delta = targetBtc - currentRealValueBtc;
       const DUST_FRACTION_OF_PORTFOLIO = 0.001;
@@ -422,7 +384,7 @@ async function gateAndExecute(
           const side = increasing ? "sell_btc_for_xaut" : "buy_btc_with_xaut";
           const resizeBtcCapital = Math.abs(delta);
           console.log(
-            `[${pair.key}] resizing allocation ${lastAppliedFraction !== undefined ? (lastAppliedFraction * 100).toFixed(0) + "%" : "unset"} -> ${(targetFraction * 100).toFixed(0)}% (${resizeBtcCapital.toFixed(8)} BTC, side ${side})`
+            `[${pair.key}] resizing allocation ${lastAppliedFraction !== undefined ? (lastAppliedFraction * 100).toFixed(0) + "%" : "unset"} -> ${(targetFraction * 100).toFixed(0)}% (${resizeBtcCapital.toFixed(8)} BTC, side ${side}, dual-gold target: ${isDualGoldState})`
           );
           const executeResult = await executeRotation({ client, side, btcCapital: resizeBtcCapital, pair, config });
           for (const rd of executeResult.routeDecisions) {
@@ -436,6 +398,37 @@ async function gateAndExecute(
         }
       }
       repo.setAllocationFraction(pair.key, targetFraction);
+    } else if (idleTopUpBtc > 0) {
+      // Case 2b: steady state - this pair's target fraction hasn't changed
+      // since it was last established (a stable 50/50 split or a stable
+      // 100/0 state). Never resize an existing held position off allocator
+      // noise; only ever deploy pre-assigned idle/top-up BTC (new money,
+      // computed once per tick in runControlLoopIteration) into this pair
+      // if it's the one that should receive it.
+      if (runMode === "PAUSED") {
+        console.log(
+          `[${pair.key}] skipping idle-capital top-up of ${idleTopUpBtc.toFixed(8)} BTC: run mode is PAUSED (treated the same as a fresh entry).`
+        );
+      } else {
+        console.log(
+          `[${pair.key}] deploying idle/top-up capital: ${idleTopUpBtc.toFixed(8)} BTC into ${pair.assetCurrency}.`
+        );
+        const executeResult = await executeRotation({
+          client,
+          side: "sell_btc_for_xaut",
+          btcCapital: idleTopUpBtc,
+          pair,
+          config,
+        });
+        for (const rd of executeResult.routeDecisions) {
+          console.log(
+            `[${pair.key}] top-up tranche ${rd.trancheIndex} routed via "${rd.route}" (direct ${rd.directSlippageBtc.toFixed(6)} BTC vs usdt ${rd.usdtSlippageBtc.toFixed(6)} BTC estimated slippage)`
+          );
+        }
+        rotated = true;
+        executedBtcCapital = idleTopUpBtc;
+        executedDirection = "into_asset";
+      }
     }
   }
 
@@ -536,29 +529,38 @@ export async function runControlLoopIteration(deps: LoopDeps): Promise<PairLoopR
 
   // Both pairs gold this tick <=> computePortfolioAllocation's exact 50/50
   // rule fired (the only combination that ever produces 0.5/0.5) - used to
-  // gate ordinary allocator-driven resizing off entirely for this tick.
+  // steer idle/top-up capital below, and for logging.
   const isDualGoldState =
     allocation !== undefined && Math.abs(allocation.xaut - 0.5) < 1e-9 && Math.abs(allocation.xmr - 0.5) < 1e-9;
 
   const walletBasis = await computeWalletBasis(deps.client, observations, deps.repo, deps.config);
 
-  // While in a dual-gold 50/50 state, steer any idle/top-up BTC sitting in
-  // the wallet (a fresh deposit, manual funding, leftover dust, etc.) toward
-  // whichever pair currently holds less BTC-equivalent value - never by
-  // selling the other pair's existing holding, only by buying with capital
-  // that wasn't invested anywhere yet. Only computed off a real wallet read,
-  // since the internal-NAV fallback can't tell idle capital apart from
-  // ordinary price drift.
+  // Steer any idle/top-up BTC sitting in the wallet (a fresh deposit, manual
+  // funding, leftover dust, etc.) toward whichever pair should receive it -
+  // never by selling the other pair's existing holding, only by buying with
+  // capital that wasn't invested anywhere yet. In a dual-gold 50/50 state,
+  // that's whichever pair currently holds less BTC-equivalent value; in a
+  // single-gold 100/0 state, that's the one pair currently at 100%. Only
+  // computed off a real wallet read, since the internal-NAV fallback can't
+  // tell idle capital apart from ordinary price drift.
   const idleTopUpByPairKey: Record<string, number> = {};
-  if (isDualGoldState && walletBasis.source === "wallet") {
+  if (allocation !== undefined && walletBasis.source === "wallet") {
     const DUST_FRACTION_OF_PORTFOLIO = 0.001;
     const dustThresholdBtc = walletBasis.totalPortfolioBtc * DUST_FRACTION_OF_PORTFOLIO;
     const idleBtc = walletBasis.btcBalance;
     if (idleBtc > dustThresholdBtc) {
-      const xautValue = walletBasis.currentValueByPairKey["xaut"] ?? 0;
-      const xmrValue = walletBasis.currentValueByPairKey["xmr"] ?? 0;
-      const underrepresentedKey = xautValue <= xmrValue ? "xaut" : "xmr";
-      idleTopUpByPairKey[underrepresentedKey] = idleBtc;
+      if (isDualGoldState) {
+        const xautValue = walletBasis.currentValueByPairKey["xaut"] ?? 0;
+        const xmrValue = walletBasis.currentValueByPairKey["xmr"] ?? 0;
+        const underrepresentedKey = xautValue <= xmrValue ? "xaut" : "xmr";
+        idleTopUpByPairKey[underrepresentedKey] = idleBtc;
+      } else {
+        const fullTargetKey =
+          allocation.xaut >= 1 - 1e-9 ? "xaut" : allocation.xmr >= 1 - 1e-9 ? "xmr" : undefined;
+        if (fullTargetKey) {
+          idleTopUpByPairKey[fullTargetKey] = idleBtc;
+        }
+      }
     }
   }
 

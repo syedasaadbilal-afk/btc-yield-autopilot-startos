@@ -1,8 +1,8 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 export const current = VersionInfo.of({
-  version: '0.1.3:0',
+  version: '0.1.4:0',
   releaseNotes: {
-    en_US: 'Fix stale open-trade reference on same-tick bootstrap+exit collisions; size all rotation/resize/entry/exit off real live wallet balances instead of internal NAV tracking (funding-agnostic); hold XAUT/XMR 50/50 split steady instead of resizing on regime noise, only reallocating on a real exit; route idle/new capital to the underrepresented or fully-gold pair; relabel ambiguous long/flat position display in dashboard.',
+    en_US: 'Fix allocation-transition gating bug: real reallocation trades now fire on every regime-driven transition (100% splitting into 50/50 dual-gold, 50/50 collapsing back to 100%, or moving between the two single-gold 100/0 states), not just once already at a stable split; steady state only accepts idle/new-money top-ups. Generalize idle-capital top-up routing to single-gold (100/0) states in addition to dual-gold.',
   },
   migrations: { up: async ({ effects }) => {}, down: IMPOSSIBLE },
 })
