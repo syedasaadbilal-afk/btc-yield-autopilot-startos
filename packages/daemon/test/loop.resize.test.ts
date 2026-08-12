@@ -32,6 +32,7 @@ function fundedFakeClient(closes: number[]): BitfinexRestClient {
     getCandles: async () => makeCandles(closes),
     getBookDepth: async () => ({ timestamp: 0, symbol: "tXAUT:BTC", bidDepth: 50, askDepth: 50 }),
     submitOrder: async () => ({ submitted: false, dryRun: true }),
+    getMinOrderSize: async () => 0,
     getWallets: async () => [
       { walletType: "exchange", currency: "BTC", balance: 10, availableBalance: 10 },
       { walletType: "exchange", currency: "XAUT", balance: 1000, availableBalance: 1000 },
@@ -45,6 +46,7 @@ function lopsidedFakeClient(closes: number[]): BitfinexRestClient {
     getCandles: async () => makeCandles(closes),
     getBookDepth: async () => ({ timestamp: 0, symbol: "tXAUT:BTC", bidDepth: 50, askDepth: 50 }),
     submitOrder: async () => ({ submitted: false, dryRun: true }),
+    getMinOrderSize: async () => 0,
     getWallets: async () => [
       { walletType: "exchange", currency: "BTC", balance: 0, availableBalance: 0 },
       { walletType: "exchange", currency: "XAUT", balance: 2000, availableBalance: 2000 },

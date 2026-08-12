@@ -16,6 +16,9 @@ export interface Trade {
   stopLossRatio: number;
   /** First-target take-profit ratio; must be >= 2x the risk distance (2:1 R:R minimum). */
   firstTargetRatio: number;
+  /** Ratio price (asset priced in BTC) at trade open/close - task #86. */
+  entryPrice?: number;
+  exitPrice?: number;
   status: "open" | "closed_win" | "closed_loss" | "cancelled";
   /** Net BTC change once fully closed and (if flat) rotated back to BTC-equivalent. */
   realizedBtcPnl?: number;

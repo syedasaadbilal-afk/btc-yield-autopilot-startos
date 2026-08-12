@@ -56,6 +56,7 @@ function makeFlatWalletClient(closes: number[]) {
     getCandles: async () => makeCandles(closes),
     getBookDepth: async () => ({ timestamp: 0, symbol: "tXAUT:BTC", bidDepth: 50, askDepth: 50 }),
     submitOrder: async () => ({ submitted: false, dryRun: true }),
+    getMinOrderSize: async () => 0,
     getWallets,
   } as unknown as BitfinexRestClient;
   return { client, getWallets };
@@ -162,6 +163,7 @@ describe("LIVE-mode bootstrap trust bug (repo.hasLiveTrade / needsLiveBootstrapC
       getCandles: async () => makeCandles(closes),
       getBookDepth: async () => ({ timestamp: 0, symbol: "tXAUT:BTC", bidDepth: 50, askDepth: 50 }),
       submitOrder: async () => ({ submitted: false, dryRun: true }),
+    getMinOrderSize: async () => 0,
       getWallets: async () => wallets,
     } as unknown as BitfinexRestClient;
     const results = await runControlLoopIteration({ client, repo, config: DEFAULT_STRATEGY_CONFIG });

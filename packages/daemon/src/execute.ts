@@ -1,6 +1,11 @@
 import type { PairConfig, StrategyConfig, TrancheExecutionPlan } from "@autopilot/shared";
 import { computeTrancheBtcAmounts } from "@autopilot/strategy";
-import { compareExecutionRoutes, planTrancheExecution, sizeClipAgainstDepth } from "@autopilot/execution";
+import {
+  capClipCountToMinOrderSize,
+  compareExecutionRoutes,
+  planTrancheExecution,
+  sizeClipAgainstDepth,
+} from "@autopilot/execution";
 import type { BitfinexRestClient } from "@autopilot/bitfinex-client";
 
 /**
@@ -73,7 +78,7 @@ async function capBtcCapitalToAvailableBalance(params: {
 
 export interface RouteDecision {
   trancheIndex: number;
-  route: "direct" | "usdt";
+  route: "direct" | "usdt" | "none";
   directSlippageBtc: number;
   usdtSlippageBtc: number;
 }
@@ -132,6 +137,11 @@ export async function executeRotation(params: {
     requestedBtcCapital: params.btcCapital,
   });
 
+  const [directMinOrderSize, btcUsdtMinOrderSize, assetUsdtMinOrderSize] = await Promise.all([
+    client.getMinOrderSize(pair.ratioSymbol),
+    client.getMinOrderSize(pair.btcUsdtSymbol),
+    client.getMinOrderSize(pair.assetUsdtSymbol),
+  ]);
   const trancheAmounts = computeTrancheBtcAmounts(btcCapital, config);
   const plans: TrancheExecutionPlan[] = [];
   const routeDecisions: RouteDecision[] = [];
@@ -166,6 +176,10 @@ export async function executeRotation(params: {
       assetUsdtDepth,
       btcUsdtPrice,
       assetUsdtPrice,
+      directPrice,
+      directMinOrderSize,
+      btcUsdtMinOrderSize,
+      assetUsdtMinOrderSize,
     });
     routeDecisions.push({
       trancheIndex: i,
@@ -173,17 +187,25 @@ export async function executeRotation(params: {
       directSlippageBtc: comparison.directSlippageBtc,
       usdtSlippageBtc: comparison.usdtSlippageBtc,
     });
+    if (comparison.route === "none") {
+      console.warn(`[${pair.key}] tranche ${i} skipped: below Bitfinex minimum order size on every route.`);
+      continue;
+    }
 
     if (comparison.route === "direct") {
+      const trancheAssetAmount = directPrice > 0 ? trancheBtcAmount / directPrice : 0;
+      const cappedClipCount = capClipCountToMinOrderSize(trancheAssetAmount, config.execution.numClipsPerTranche, directMinOrderSize);
+      if (cappedClipCount <= 0) {
+        console.warn(`[${pair.key}] tranche ${i} skipped: below direct minimum order size.`);
+        continue;
+      }
       const plan = planTrancheExecution({
         trancheId: `${Date.now()}-${pair.key}-direct-${i}`,
         trancheWeight,
         side,
         scheduledStart: Date.now(),
-        config: config.execution,
+        config: { ...config.execution, numClipsPerTranche: cappedClipCount },
       });
-      // Direct pair's amount is asset-denominated (btc-per-asset convention).
-      const trancheAssetAmount = directPrice > 0 ? trancheBtcAmount / directPrice : 0;
       const evenSlice = trancheAssetAmount / plan.numClips;
       let remaining = trancheAssetAmount;
       for (const clip of plan.clips) {
@@ -237,15 +259,19 @@ export async function executeRotation(params: {
             : 0;
       const legSideLabel: "buy_btc_with_xaut" | "sell_btc_for_xaut" =
         leg.action === "buy" ? "buy_btc_with_xaut" : "sell_btc_for_xaut";
-
+      const legMinOrderSize = leg.symbol === pair.btcUsdtSymbol ? btcUsdtMinOrderSize : assetUsdtMinOrderSize;
+      const cappedClipCount = capClipCountToMinOrderSize(legAmount, config.execution.numClipsPerTranche, legMinOrderSize);
+      if (cappedClipCount <= 0) {
+        console.warn(`[${pair.key}] tranche ${i} leg ${leg.symbol} skipped: below minimum order size.`);
+        continue;
+      }
       const plan = planTrancheExecution({
         trancheId: `${Date.now()}-${pair.key}-usdt-${leg.symbol}-${i}`,
         trancheWeight,
         side: legSideLabel,
         scheduledStart: Date.now(),
-        config: config.execution,
+        config: { ...config.execution, numClipsPerTranche: cappedClipCount },
       });
-
       const evenSlice = legAmount / plan.numClips;
       let remaining = legAmount;
       for (const clip of plan.clips) {

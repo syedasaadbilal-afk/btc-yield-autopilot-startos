@@ -15,8 +15,12 @@ function formatReturn(pnl: number | undefined, capital: number): string {
   return `${sign}${pct.toFixed(2)}%`;
 }
 
+function formatPrice(price: number | undefined): string {
+  return price !== undefined ? price.toFixed(6) : "-";
+}
+
 /** Trade log table - matches Hashrate Autopilot's Timeline event log density/style, plus a
- * TradingView-style summary row (total trades, win rate, net PnL) and per-trade Return %. */
+ * TradingView-style summary row (total trades, win rate, net PnL) and per-trade Entry/Exit/Return. */
 export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: DisplayUnit }) {
   if (trades.length === 0) {
     return <div className="text-sm text-slate-500 py-4">No trades recorded yet.</div>;
@@ -26,7 +30,6 @@ export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: Displa
   const wins = trades.filter((t) => t.status === "closed_win").length;
   const totalNetPnl = closed.reduce((sum, t) => sum + (t.realizedBtcPnl ?? 0), 0);
   const winRate = closed.length > 0 ? (wins / closed.length) * 100 : null;
-
   return (
     <div className="space-y-3">
       {closed.length > 0 && (
@@ -52,6 +55,8 @@ export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: Displa
             <th className="py-1.5 pr-3">Opened</th>
             <th className="py-1.5 pr-3">Closed</th>
             <th className="py-1.5 pr-3">Target</th>
+            <th className="py-1.5 pr-3">Entry</th>
+            <th className="py-1.5 pr-3">Exit</th>
             <th className="py-1.5 pr-3">BTC capital</th>
             <th className="py-1.5 pr-3">Realized PnL</th>
             <th className="py-1.5 pr-3">Return</th>
@@ -68,6 +73,8 @@ export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: Displa
                 {t.closedAt ? new Date(t.closedAt).toLocaleString() : "-"}
               </td>
               <td className="py-1.5 pr-3">{t.targetPosition}</td>
+              <td className="py-1.5 pr-3">{formatPrice(t.entryPrice)}</td>
+              <td className="py-1.5 pr-3">{formatPrice(t.exitPrice)}</td>
               <td className="py-1.5 pr-3">{formatBtcAmount(t.btcCapitalAtOpen, unit)}</td>
               <td className="py-1.5 pr-3">
                 {t.realizedBtcPnl !== undefined ? formatBtcAmount(t.realizedBtcPnl, unit, { signed: true }) : "-"}

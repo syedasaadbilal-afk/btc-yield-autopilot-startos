@@ -57,6 +57,7 @@ function clientForSymbols(closesBySymbol: Record<string, number[]>, wallets = ES
     getCandles: async (symbol: string) => makeCandles(closesBySymbol[symbol] ?? closesBySymbol[XAUT_SYMBOL]!),
     getBookDepth: async () => ({ timestamp: 0, symbol: XAUT_SYMBOL, bidDepth: 50, askDepth: 50 }),
     submitOrder: async () => ({ submitted: false, dryRun: true }),
+    getMinOrderSize: async () => 0,
     getWallets: async () => wallets,
   } as unknown as BitfinexRestClient;
 }
@@ -180,6 +181,7 @@ describe("cross-pair rotation & allocation (asymmetric regimes, daemon-level)", 
       },
       getBookDepth: async () => ({ timestamp: 0, symbol: XAUT_SYMBOL, bidDepth: 50, askDepth: 50 }),
       submitOrder: async () => ({ submitted: false, dryRun: true }),
+    getMinOrderSize: async () => 0,
       getWallets: async () => FRESH_BTC_ONLY_WALLET,
     } as unknown as BitfinexRestClient;
 

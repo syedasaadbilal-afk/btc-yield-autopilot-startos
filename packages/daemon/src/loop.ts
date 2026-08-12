@@ -180,6 +180,7 @@ async function observeAndDecide(deps: LoopDeps & { pair: PairConfig }): Promise<
         targetPosition: "long",
         btcCapitalAtOpen: pairStartingBtcFallback,
         riskFractionOfCapital: config.risk.riskFractionPerTrade,
+        entryPrice: bootstrapEntryPrice,
         stopLossRatio: bootstrapEntryPrice,
         firstTargetRatio: bootstrapEntryPrice,
         status: "open",
@@ -364,13 +365,19 @@ async function gateAndExecute(
         targetPosition: "long",
         btcCapitalAtOpen: btcCapital,
         riskFractionOfCapital: config.risk.riskFractionPerTrade,
+        entryPrice,
         stopLossRatio: stopAndTarget.stopPrice,
         firstTargetRatio: stopAndTarget.firstTargetPrice,
         status: "open",
         trancheExecutionPlanIds: [],
       });
     } else if (openTrade) {
-      repo.closeTrade(openTrade.id, "closed_win", 0);
+      const exitPrice = accountingCandles[accountingCandles.length - 1]?.close;
+      const pnl =
+        exitPrice !== undefined && openTrade.entryPrice !== undefined && openTrade.entryPrice > 0
+          ? openTrade.btcCapitalAtOpen * (1 - exitPrice / openTrade.entryPrice)
+          : 0;
+      repo.closeTrade(openTrade.id, pnl >= 0 ? "closed_win" : "closed_loss", pnl, exitPrice);
     }
     repo.setAllocationFraction(pair.key, targetFraction);
   } else if (gateResult.allow && currentPosition === "flat") {
@@ -598,10 +605,13 @@ export async function runControlLoopIteration(deps: LoopDeps): Promise<PairLoopR
   }
 
   for (const obs of observations) {
+    // Hoisted out of the try block (bug found live, Aug 2026) so the catch
+    // path reports the real intended target instead of falling back to the
+    // static capitalFractionBtc default when gate/execute throws.
+    const targetFraction = allocation
+      ? ((allocation as Record<string, number>)[obs.pair.key] ?? obs.pair.capitalFractionBtc)
+      : obs.pair.capitalFractionBtc;
     try {
-      const targetFraction = allocation
-        ? ((allocation as Record<string, number>)[obs.pair.key] ?? obs.pair.capitalFractionBtc)
-        : obs.pair.capitalFractionBtc;
       results.push(
         await gateAndExecute(
           deps,
@@ -622,7 +632,7 @@ export async function runControlLoopIteration(deps: LoopDeps): Promise<PairLoopR
         gateAllowed: false,
         gateReason: "Tick threw during gate/execute.",
         rotated: false,
-        targetFraction: obs.pair.capitalFractionBtc,
+        targetFraction,
         error: err instanceof Error ? err.message : String(err),
       });
     }

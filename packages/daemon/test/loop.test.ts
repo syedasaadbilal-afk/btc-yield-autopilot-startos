@@ -29,6 +29,7 @@ function fakeClient(closes: number[]): BitfinexRestClient {
     getCandles: async () => makeCandles(closes),
     getBookDepth: async () => ({ timestamp: 0, symbol: "tXAUT:BTC", bidDepth: 5, askDepth: 5 }),
     submitOrder: async () => ({ submitted: false, dryRun: true }),
+    getMinOrderSize: async () => 0,
     // Empty wallet: deriveBootstrapPosition (loop.ts) and
     // capBtcCapitalToAvailableBalance (execute.ts) both treat this as
     // "nothing held/available" and fall back gracefully rather than

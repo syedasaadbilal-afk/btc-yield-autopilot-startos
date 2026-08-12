@@ -15,8 +15,21 @@ export function PortfolioPnl({
   let totalNav = 0;
   let totalFunded = 0;
   const perPair = status.pairs.map((pair) => {
-    const funded = status.startingBtc * pair.capitalFractionBtc;
     const hist = navByPair[pair.pairKey] ?? [];
+    // Funded/cost-basis baseline (task #95): use this pair's FIRST-EVER NAV
+    // point instead of a live-recomputed percentage of total starting
+    // capital. pair.capitalFractionBtc is the CURRENT dynamic allocation
+    // (regime-driven, or manually overridden via the Config tab) and
+    // changes over time - using it here meant "funded" silently shifted
+    // every time allocation moved, even though no new capital was actually
+    // deployed (e.g. XMR's funded jumped from 0.00375 to 0.0045 BTC the
+    // moment its target allocation moved from 50% to 60%, even though that
+    // 0.00075 BTC was never really contributed). hist is ascending (see
+    // repo.getNavHistory's ORDER BY timestamp ASC), so hist[0] is the
+    // earliest recorded value - falls back to the old fraction-based
+    // estimate only before this pair has any NAV history yet (its very
+    // first tick).
+    const funded = hist.length > 0 ? hist[0]!.btcEquivalentNav : status.startingBtc * pair.capitalFractionBtc;
     const nav = hist.length > 0 ? hist[hist.length - 1]!.btcEquivalentNav : funded;
     totalNav += nav;
     totalFunded += funded;
@@ -24,14 +37,11 @@ export function PortfolioPnl({
     const yieldFraction = funded > 0 ? pnl / funded : 0;
     return { pair, funded, nav, pnl, yieldFraction };
   });
-
   const portfolioPnl = totalNav - totalFunded;
   const portfolioYield = totalFunded > 0 ? portfolioPnl / totalFunded : 0;
-
   return (
     <div className="bg-ink-900 border border-slate-800 rounded-lg p-4">
       <h3 className="text-xs font-semibold tracking-wider text-slate-300 uppercase mb-3">Profit &amp; loss · portfolio</h3>
-
       <div className="space-y-1.5">
         <div className="flex items-baseline justify-between text-sm">
           <span className="text-slate-500">funded (whole portfolio)</span>
@@ -48,7 +58,6 @@ export function PortfolioPnl({
           </div>
         ))}
       </div>
-
       <div className="border-t border-slate-700 mt-3 pt-2 flex items-baseline justify-between">
         <span className="text-slate-300 font-semibold text-sm">net BTC PnL</span>
         <span className={`font-bold text-lg ${portfolioPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>

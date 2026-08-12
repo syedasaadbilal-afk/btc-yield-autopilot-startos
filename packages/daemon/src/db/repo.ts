@@ -116,8 +116,9 @@ export class Repo {
     this.db
       .prepare(
         `INSERT INTO trades (id, run_mode, pair_key, opened_at, closed_at, target_position, btc_capital_at_open,
-           risk_fraction_of_capital, stop_loss_ratio, first_target_ratio, status, realized_btc_pnl, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           risk_fraction_of_capital, stop_loss_ratio, first_target_ratio, status, realized_btc_pnl, notes,
+           entry_price, exit_price)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         trade.id,
@@ -132,14 +133,21 @@ export class Repo {
         trade.firstTargetRatio,
         trade.status,
         trade.realizedBtcPnl ?? null,
-        trade.notes ?? null
+        trade.notes ?? null,
+        trade.entryPrice ?? null,
+        trade.exitPrice ?? null
       );
   }
 
-  closeTrade(id: string, status: "closed_win" | "closed_loss" | "cancelled", realizedBtcPnl: number): void {
+  closeTrade(
+    id: string,
+    status: "closed_win" | "closed_loss" | "cancelled",
+    realizedBtcPnl: number,
+    exitPrice?: number
+  ): void {
     this.db
-      .prepare("UPDATE trades SET status = ?, closed_at = ?, realized_btc_pnl = ? WHERE id = ?")
-      .run(status, Date.now(), realizedBtcPnl, id);
+      .prepare("UPDATE trades SET status = ?, closed_at = ?, realized_btc_pnl = ?, exit_price = ? WHERE id = ?")
+      .run(status, Date.now(), realizedBtcPnl, exitPrice ?? null, id);
   }
 
   getOpenTrade(pairKey: string = DEFAULT_PAIR_KEY): Trade | undefined {
@@ -271,6 +279,8 @@ function rowToTrade(row: unknown): Trade {
   const realizedBtcPnl = r.realized_btc_pnl as number | null;
   const notes = r.notes as string | null;
   const pairKey = r.pair_key as string | null;
+  const entryPrice = r.entry_price as number | null;
+  const exitPrice = r.exit_price as number | null;
 
   return {
     id: r.id as string,
@@ -289,6 +299,8 @@ function rowToTrade(row: unknown): Trade {
     ...(realizedBtcPnl !== null ? { realizedBtcPnl } : {}),
     ...(notes !== null ? { notes } : {}),
     ...(pairKey !== null ? { pairKey } : {}),
+    ...(entryPrice !== null ? { entryPrice } : {}),
+    ...(exitPrice !== null ? { exitPrice } : {}),
   };
 }
 

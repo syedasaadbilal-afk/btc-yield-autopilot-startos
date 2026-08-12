@@ -36,6 +36,11 @@ type FetchLike = typeof fetch;
 export class BitfinexRestClient {
   private readonly nonce = new MonotonicNonce();
   private readonly limiter = new RateLimiter(30, 30 / 60_000); // ~30 req/min, conservative default
+  // Cache for getMinOrderSize (task #94) - minimum order sizes are an
+  // exchange config value, not a live market figure, so a long TTL avoids
+  // hitting the public conf endpoint on every tranche of every tick.
+  private pairInfoCache: { at: number; bySymbol: Map<string, number> } | null = null;
+  private static readonly PAIR_INFO_CACHE_MS = 60 * 60 * 1000; // 1 hour
 
   constructor(
     private readonly config: BitfinexClientConfig,
@@ -78,6 +83,41 @@ export class BitfinexRestClient {
       else askDepth += Math.abs(amount);
     }
     return { timestamp: Date.now(), symbol, bidDepth, askDepth };
+  }
+
+  /**
+   * Exchange minimum order size for a symbol (task #94), asset-denominated
+   * to match Bitfinex's own convention: the minimum for a pair like
+   * "XAUT:BTC" is quoted in XAUT (the pair's BASE currency), not BTC - the
+   * same currency submitOrder's `amount` field uses for that symbol. Reads
+   * the public pub:info:pair conf endpoint (no auth), which returns EVERY
+   * pair in one response rather than supporting a per-symbol filter, so the
+   * full list is parsed once and cached rather than re-fetched per call.
+   * Returns 0 (no constraint) for a symbol not present in the response
+   * rather than throwing, so a temporarily-missing/renamed pair degrades to
+   * the old unconstrained behavior instead of blocking a tick.
+   */
+  async getMinOrderSize(symbol: string): Promise<number> {
+    const now = Date.now();
+    if (!this.pairInfoCache || now - this.pairInfoCache.at > BitfinexRestClient.PAIR_INFO_CACHE_MS) {
+      await this.waitForToken();
+      const url = `${this.config.baseUrl}/v2/conf/pub:info:pair`;
+      const res = await this.fetchImpl(url);
+      if (!res.ok) throw new Error(`getMinOrderSize fetch failed: ${res.status} ${await res.text()}`);
+      const raw = (await res.json()) as [[string, (string | number | null)[]][]];
+      const bySymbol = new Map<string, number>();
+      for (const entry of raw[0] ?? []) {
+        const [pair, info] = entry;
+        const minSize = info[3];
+        if (minSize !== null && minSize !== undefined) {
+          bySymbol.set(pair, Number(minSize));
+        }
+      }
+      this.pairInfoCache = { at: now, bySymbol };
+    }
+    // Bitfinex's conf response omits the "t" trading prefix our symbols carry (e.g. "tXAUT:BTC" -> "XAUT:BTC").
+    const key = symbol.startsWith("t") ? symbol.slice(1) : symbol;
+    return this.pairInfoCache.bySymbol.get(key) ?? 0;
   }
 
   // ---- Private trading endpoints (auth required) ----

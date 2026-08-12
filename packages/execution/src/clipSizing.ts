@@ -51,3 +51,29 @@ export function estimateClipSlippageBtc(
   const slippageFraction = Math.min(1, depthFraction ** 1.5 * 0.02);
   return clipBtcAmount * slippageFraction;
 }
+
+/**
+ * Caps a tranche's clip count so each resulting clip, once evenly sliced,
+ * still clears the exchange's minimum order size for the symbol it'll trade
+ * on (task #94 - Bitfinex rejects orders below this with "Invalid order:
+ * minimum size..."). The tranche/clip layering exists to avoid market
+ * impact on LARGE size; on a small account it can fragment an
+ * already-fundable tranche into pieces individually below the exchange
+ * floor even though the whole tranche alone would clear it (confirmed live,
+ * Aug 2026: a 0.00635 XAUT tranche split into 4 clips came out to ~0.0016
+ * XAUT/clip, under Bitfinex's 0.002 XAUT minimum for XAUT:BTC, even though
+ * the tranche itself was well above it). This keeps clips whole (fewer,
+ * larger) instead of slicing into doomed sub-minimum orders. Returns 0 if
+ * even a single un-sliced clip (the whole amount) can't clear the minimum -
+ * the caller should skip trading this amount rather than submit it.
+ */
+export function capClipCountToMinOrderSize(
+  totalAmount: number,
+  requestedClipCount: number,
+  minOrderSize: number
+): number {
+  if (minOrderSize <= 0) return requestedClipCount;
+  if (totalAmount < minOrderSize) return 0;
+  const maxClipsThatClearMinimum = Math.floor(totalAmount / minOrderSize);
+  return Math.max(1, Math.min(requestedClipCount, maxClipsThatClearMinimum));
+}

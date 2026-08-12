@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { sizeClipAgainstDepth, checkSlippageBudget, estimateClipSlippageBtc } from "../src/clipSizing.js";
+import {
+  sizeClipAgainstDepth,
+  checkSlippageBudget,
+  estimateClipSlippageBtc,
+  capClipCountToMinOrderSize,
+} from "../src/clipSizing.js";
 
 const depth = { timestamp: 0, symbol: "tBTC:XAUT", bidDepth: 2, askDepth: 1 };
 
@@ -48,5 +53,23 @@ describe("estimateClipSlippageBtc", () => {
     const small = estimateClipSlippageBtc(0.1, depth, "buy_btc_with_xaut");
     const large = estimateClipSlippageBtc(0.9, depth, "buy_btc_with_xaut");
     expect(large).toBeGreaterThan(small);
+  });
+});
+
+describe("capClipCountToMinOrderSize", () => {
+  it("returns the requested clip count unchanged when it already clears the minimum per clip", () => {
+    expect(capClipCountToMinOrderSize(1, 4, 0.1)).toBe(4); // 0.25 per clip >= 0.1
+  });
+  it("reduces the clip count so each remaining clip clears the minimum", () => {
+    expect(capClipCountToMinOrderSize(0.1, 4, 0.03)).toBe(3); // floor(0.1/0.03)=3
+  });
+  it("returns 0 when even a single un-sliced order can't clear the minimum", () => {
+    expect(capClipCountToMinOrderSize(0.001, 4, 0.002)).toBe(0);
+  });
+  it("treats a non-positive minimum as no constraint", () => {
+    expect(capClipCountToMinOrderSize(1, 4, 0)).toBe(4);
+  });
+  it("never returns more than the requested clip count even with abundant size", () => {
+    expect(capClipCountToMinOrderSize(1000, 4, 0.001)).toBe(4);
   });
 });
