@@ -25,6 +25,8 @@ export interface PairStatus {
   distFromBaseline: number | null;
   btcEquivalentNav: number | null;
   openTrade: unknown | null;
+  /** Real live Bitfinex wallet balance of this pair's rotation asset (XAUT/XMR) - not the internal NAV ledger. Null if secrets unset or fetch failed. */
+  realAssetHeld: number | null;
 }
 
 export interface StatusResponse {
@@ -33,6 +35,8 @@ export interface StatusResponse {
   lastTickAt: number | null;
   nextTickAt: number | null;
   startingBtc: number;
+  /** Real live Bitfinex BTC exchange-wallet balance (portfolio-wide, BTC is fungible across pairs). Null if secrets unset or fetch failed. */
+  realBtcHeld: number | null;
   pairs: PairStatus[];
 }
 

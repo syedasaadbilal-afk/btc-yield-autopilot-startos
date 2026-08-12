@@ -96,6 +96,21 @@ export function StatusTab({
         </div>
       </div>
 
+      {/* Real live wallet balances - ground truth from Bitfinex, not the internal NAV ledger */}
+      <div className="grid grid-cols-3 gap-3">
+        <MetricTile
+          label="BTC held (live)"
+          value={status.realBtcHeld !== null ? status.realBtcHeld.toFixed(8) : "-"}
+        />
+        <MetricTile
+          label="XAUT held (live)"
+          value={status.pairs.find((p) => p.pairKey === "xaut")?.realAssetHeld?.toFixed(6) ?? "-"}
+        />
+        <MetricTile
+          label="XMR held (live)"
+          value={status.pairs.find((p) => p.pairKey === "xmr")?.realAssetHeld?.toFixed(6) ?? "-"}
+        />
+      </div>
       {/* Metric tile row - matches Hashrate Autopilot's UPTIME/POOL LUCK/BLOCK HEIGHT row */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         {status.pairs.map((pair) => (

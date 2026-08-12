@@ -4,7 +4,8 @@ import fs from "node:fs";
 import { DEFAULT_STRATEGY_CONFIG, RUN_MODES, type RunMode } from "@autopilot/shared";
 import type { Repo } from "./db/repo.js";
 import type { PairLoopResult } from "./loop.js";
-import { hasBitfinexSecrets, writeBitfinexSecrets } from "./secrets.js";
+import { hasBitfinexSecrets, writeBitfinexSecrets, readBitfinexSecrets } from "./secrets.js";
+import { BitfinexRestClient } from "@autopilot/bitfinex-client";
 
 /**
  * In-memory snapshot of the most recent tick, updated by index.ts after every
@@ -29,7 +30,37 @@ export interface CreateServerOptions {
   dbPath: string;
 }
 
+// Real live Bitfinex wallet balances for /api/status - cached briefly to
+// avoid hammering the exchange API on every dashboard poll. Separate from
+// the internal NAV/allocation ledger, which can drift from the real wallet
+// (see the Aug 2026 dashboard staleness bug) - this is ground truth read
+// straight from the exchange.
+let walletCache: { at: number; balances: Record<string, number> } | null = null;
+const WALLET_CACHE_MS = 15_000;
+const PAIR_WALLET_CURRENCY: Record<string, string> = { xaut: "XAUT", xmr: "XMR" };
+
 export async function createServer(opts: CreateServerOptions) {
+  async function getLiveWalletBalances(): Promise<Record<string, number>> {
+    if (walletCache && Date.now() - walletCache.at < WALLET_CACHE_MS) return walletCache.balances;
+    if (!hasBitfinexSecrets(opts.dbPath)) return {};
+    try {
+      const secrets = readBitfinexSecrets(opts.dbPath);
+      const client = new BitfinexRestClient({
+        apiKey: secrets.apiKey,
+        apiSecret: secrets.apiSecret,
+        baseUrl: process.env.BFX_BASE_URL ?? "https://api.bitfinex.com",
+        runMode: opts.repo.getRunMode(),
+      });
+      const wallets = await client.getWallets();
+      const balances: Record<string, number> = {};
+      for (const w of wallets) balances[w.currency.toUpperCase()] = w.balance;
+      walletCache = { at: Date.now(), balances };
+      return balances;
+    } catch (err) {
+      console.error("[autopilot] failed to fetch live wallet balances:", err);
+      return walletCache?.balances ?? {};
+    }
+  }
   const fastify = Fastify({ logger: false });
 
   const hasStatic = opts.staticDir && fs.existsSync(opts.staticDir);
@@ -50,6 +81,7 @@ export async function createServer(opts: CreateServerOptions) {
 
   fastify.get("/api/status", async () => {
     const runMode = opts.repo.getRunMode();
+    const liveBalances = await getLiveWalletBalances();
     const pairs = DEFAULT_STRATEGY_CONFIG.pairs.map((pair) => {
       const openTrade = opts.repo.getOpenTrade(pair.key);
       const latestDecision = opts.repo.getLatestLarssonDecision(pair.key);
@@ -77,6 +109,7 @@ export async function createServer(opts: CreateServerOptions) {
         distFromBaseline: latestDecision?.distFromBaseline ?? null,
         btcEquivalentNav: latestNav?.btcEquivalentNav ?? null,
         openTrade: openTrade ?? null,
+        realAssetHeld: liveBalances[PAIR_WALLET_CURRENCY[pair.key] ?? ""] ?? null,
       };
     });
     return {
@@ -85,6 +118,7 @@ export async function createServer(opts: CreateServerOptions) {
       lastTickAt: opts.state.lastTickAt,
       nextTickAt: opts.state.lastTickAt ? opts.state.lastTickAt + opts.state.tickMs : null,
       startingBtc: DEFAULT_STRATEGY_CONFIG.capital.startingBtc,
+      realBtcHeld: liveBalances["BTC"] ?? null,
       pairs,
     };
   });
