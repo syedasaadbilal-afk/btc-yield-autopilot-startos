@@ -81,7 +81,25 @@ async function deriveBootstrapPosition(params: {
       return dbDerivedPosition;
     }
 
-    const inferred: PositionState = assetBalanceInBtc > btcBalance ? "flat" : "long";
+    // BUG (found live, Aug 2026): this used to compare assetBalanceInBtc
+    // against the RAW WALLET BTC BALANCE. That's wrong whenever more than
+    // one pair is configured, because the BTC wallet is POOLED across every
+    // pair, not attributable to any single one - when both pairs are near a
+    // 50/50 dual-gold split, this pair's own asset value and the OTHER
+    // pair's BTC allocation sitting in the shared wallet are nearly equal,
+    // making the comparison a coin flip on tiny price movement. Confirmed
+    // live: XAUT genuinely held 0.05626682 XAUT (0.00383188 BTC-equiv) while
+    // the pooled wallet held 0.00383618 BTC (actually XMR's allocation) -
+    // the old formula inferred "long" (wrong), triggering a needless real
+    // rotation attempt that then failed on the exchange's minimum order
+    // size, blocking every subsequent tick.
+    //
+    // Correct rule: THIS pair is "flat" (holding its own rotation asset) if
+    // and only if it holds a meaningful (non-dust) amount of that asset -
+    // full stop. The pooled BTC balance is irrelevant to which pair
+    // "currently holds" it; it only matters for sizing, handled elsewhere.
+    const ASSET_DUST_THRESHOLD_BTC = 0.0001; // ~$6-7 - below this, treat as no real holding (rounding/fee dust)
+    const inferred: PositionState = assetBalanceInBtc > ASSET_DUST_THRESHOLD_BTC ? "flat" : "long";
     console.log(
       `[${pair.key}] bootstrap position check: BTC=${btcBalance.toFixed(8)}, ${pair.assetCurrency}=${assetBalance.toFixed(8)} (${assetBalanceInBtc.toFixed(8)} BTC-equiv) -> inferred "${inferred}" (DB-derived default was "${dbDerivedPosition}").`
     );

@@ -137,4 +137,41 @@ describe("LIVE-mode bootstrap trust bug (repo.hasLiveTrade / needsLiveBootstrapC
     expect(xmr3.decisionTarget).toBe("long");
     expect(xmr3.rotated).toBe(false);
   });
+
+  it("infers a dual-gold pair as flat (not long) when its own asset value is nearly equal to the OTHER pair's pooled BTC allocation", async () => {
+    // Reproduces a real production incident (Aug 2026): both pairs sitting
+    // at a clean 50/50 dual-gold split share one pooled BTC wallet balance.
+    // XAUT genuinely holds its own asset; the pooled BTC actually belongs to
+    // XMR's allocation (XMR holds none of its own asset). The old bootstrap
+    // formula compared XAUT's own value against the FULL pooled BTC balance
+    // instead of just checking whether XAUT holds a meaningful amount of
+    // ITS OWN asset - since the two values are nearly equal at a clean
+    // 50/50 split, it flipped to "long" on a hair's difference, triggering
+    // a needless real rotation attempt that then failed on the exchange's
+    // minimum order size and blocked every subsequent tick. Real numbers
+    // from the incident: BTC=0.00383618, XAUT=0.05626682 (0.00383188
+    // BTC-equiv) -> old formula inferred "long" (wrong); should be "flat".
+    repo.setRunMode("LIVE");
+    const closes = linearRamp(0.0665, 0.068105, 260); // mild drift in the real XAUT:BTC ratio's scale - shouldn't itself trigger a flip
+    const wallets = [
+      { walletType: "exchange", currency: "BTC", balance: 0.00383618, availableBalance: 0.00383618 },
+      { walletType: "exchange", currency: "XAUT", balance: 0.05626682, availableBalance: 0.05626682 },
+      { walletType: "exchange", currency: "XMR", balance: 0, availableBalance: 0 },
+    ];
+    const client = {
+      getCandles: async () => makeCandles(closes),
+      getBookDepth: async () => ({ timestamp: 0, symbol: "tXAUT:BTC", bidDepth: 50, askDepth: 50 }),
+      submitOrder: async () => ({ submitted: false, dryRun: true }),
+      getWallets: async () => wallets,
+    } as unknown as BitfinexRestClient;
+    const results = await runControlLoopIteration({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    const xaut = results.find((r) => r.pairKey === "xaut")!;
+    const xmr = results.find((r) => r.pairKey === "xmr")!;
+    // XAUT genuinely holds its own asset - must be inferred "flat", not "long".
+    expect(xaut.currentPosition).toBe("flat");
+    expect(xaut.rotated).toBe(false);
+    expect(xaut.error).toBeUndefined();
+    // XMR genuinely holds none of its own asset - correctly "long".
+    expect(xmr.currentPosition).toBe("long");
+  });
 });
