@@ -162,7 +162,14 @@ export function StatusTab({
                 resizeBlocked
                   ? pair.currentPosition === "flat"
                     ? `target ${(pair.capitalFractionBtc * 100).toFixed(0)}% blocked - below exchange minimum`
-                    : `target ${(pair.capitalFractionBtc * 100).toFixed(0)}% - waiting for own regime to go gold`
+                    : // Bug found live Aug 2026 (round 2): this used to assert
+                      // "waiting for own regime to go gold", but a pair can
+                      // already BE gold (regime orange) and still be blocked -
+                      // e.g. the anti-chase entry-distance gate. This tile has
+                      // no room for the real reason text, so it now says
+                      // something that's always true and points at the pair
+                      // card below (PairPanel's `reason` line) for specifics.
+                      `target ${(pair.capitalFractionBtc * 100).toFixed(0)}% - not yet rotated, see pair panel below`
                   : (pair.regime ?? "no regime yet")
               }
               valueColor={resizeBlocked ? "text-amber-400" : pair.regime === "orange" ? "text-amber-400" : "text-slate-100"}

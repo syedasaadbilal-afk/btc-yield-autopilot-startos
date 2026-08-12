@@ -77,17 +77,21 @@ export function PairPanel({
             label=""
             // "below exchange minimum" is only the real reason when this pair
             // is currently flat (holding its own asset) - a resize was
-            // genuinely attempted and every tranche failed the minimum. When
-            // the pair is "long" (BTC), the override's target simply can't
-            // apply yet - it only sizes a pair once its OWN regime lets it
-            // hold the asset at all - so no resize was ever attempted. Bug
-            // found live Aug 2026: this used to show the "below exchange
-            // minimum" text unconditionally, which was actively misleading
-            // for a pair like XMR that just hasn't gone gold yet.
+            // genuinely attempted and every tranche failed the minimum.
+            //
+            // Bug found live Aug 2026 (round 2): the "long" branch used to
+            // assert a specific reason ("waiting for own regime to go gold"),
+            // but that's not always true - a pair can already show regime
+            // "orange"/gold while still being "long" (BTC), e.g. blocked by
+            // the anti-chase entry-distance gate (price too far above
+            // baseline to enter safely). Asserting the wrong reason is worse
+            // than a generic one, so this now just points at the `reason`
+            // text already rendered below, which reflects the real cause
+            // every time (regime, entry-distance gate, cooldown, etc.).
             value={
               status.currentPosition === "flat"
                 ? `target ${(status.capitalFractionBtc * 100).toFixed(0)}% blocked - below exchange minimum order size`
-                : `target ${(status.capitalFractionBtc * 100).toFixed(0)}% - waiting for ${status.displayName.split(" ")[0]}'s own regime to go gold`
+                : `target ${(status.capitalFractionBtc * 100).toFixed(0)}% - not yet rotated, see reason below`
             }
             valueClass="text-amber-400 text-xs"
           />
