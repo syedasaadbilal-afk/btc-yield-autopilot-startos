@@ -94,6 +94,7 @@ export async function createServer(opts: CreateServerOptions) {
       // before this pair has ever ticked at all.
       const targetFractionBtc =
         lastResult?.targetFraction ?? opts.repo.getAllocationFraction(pair.key) ?? pair.capitalFractionBtc;
+      const currentPosition = lastResult?.currentPosition ?? (openTrade ? "long" : "flat");
       return {
         pairKey: pair.key,
         displayName: pair.displayName,
@@ -104,8 +105,28 @@ export async function createServer(opts: CreateServerOptions) {
         // blocked (e.g. below Bitfinex's minimum order size, see loop.ts's
         // resizeBlocked handling), so the dashboard can show "blocked"
         // instead of falsely claiming the target was reached.
-        appliedFractionBtc: opts.repo.getAllocationFraction(pair.key) ?? pair.capitalFractionBtc,
-        currentPosition: lastResult?.currentPosition ?? (openTrade ? "long" : "flat"),
+        //
+        // Bug found live Aug 2026 (round 3): loop.ts's persist-on-apply logic
+        // (repo.setAllocationFraction) only runs inside the "currentPosition
+        // === flat" branch of gateAndExecute - a pair that's currently
+        // "long" (holding pooled BTC, no distinct asset of its own) never
+        // re-enters that branch on any tick where it stays long, so its
+        // persisted fraction only gets written once, at the moment it last
+        // flipped, then goes stale forever while it remains long - even as
+        // the live target keeps moving (regime shift, operator override
+        // change). This isn't actually a problem in reality: a "long" pair's
+        // share is definitionally "whatever the other pair's real asset
+        // isn't holding," so once the OTHER (flat) pair is resized to ITS
+        // target, this pair's share already matches its own target with zero
+        // trade needed - there's nothing to "apply." So for a long pair,
+        // applied should just always equal the live target; the persisted
+        // DB value only matters for a flat pair, where a real currency
+        // conversion trade genuinely has to execute to move holdings.
+        appliedFractionBtc:
+          currentPosition === "long"
+            ? targetFractionBtc
+            : (opts.repo.getAllocationFraction(pair.key) ?? pair.capitalFractionBtc),
+        currentPosition,
         decisionTarget: lastResult?.decisionTarget ?? latestDecision?.position ?? "flat",
         gateAllowed: lastResult?.gateAllowed ?? true,
         gateReason: lastResult?.gateReason ?? "No tick yet.",
@@ -115,6 +136,21 @@ export async function createServer(opts: CreateServerOptions) {
         reason: latestDecision?.reason ?? null,
         distFromBaseline: latestDecision?.distFromBaseline ?? null,
         btcEquivalentNav: latestNav?.btcEquivalentNav ?? null,
+        // Bug found live Aug 2026 (round 3): this used to be computed
+        // dashboard-side from this pair's very first-ever NAV history point
+        // (frozen forever, #95/#101) - which read as trading loss/gain
+        // whenever capital was deliberately reallocated between pairs (a
+        // manual override change, or a regime-driven 100/0 <-> 50/50
+        // transition), producing misleading yield percentages. Now computed
+        // server-side from funding_baseline, which loop.ts re-baselines to
+        // the pair's current value every time its target fraction actually
+        // changes - see gateAndExecute. Falls back to the current NAV (or
+        // the static starting-capital estimate) before this pair has ever
+        // ticked and set a baseline at all.
+        fundedBtc:
+          opts.repo.getFundingBaseline(pair.key)?.btcEquivalentNav ??
+          latestNav?.btcEquivalentNav ??
+          DEFAULT_STRATEGY_CONFIG.capital.startingBtc * targetFractionBtc,
         openTrade: openTrade ?? null,
         realAssetHeld: liveBalances[PAIR_WALLET_CURRENCY[pair.key] ?? ""] ?? null,
       };

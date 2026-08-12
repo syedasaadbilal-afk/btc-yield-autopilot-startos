@@ -586,14 +586,35 @@ async function gateAndExecute(
       assetHeld = positionAfter === "flat" ? fallbackBtc * lastCandle.close : 0;
     }
 
+    const btcEquivalentNav = computeBtcEquivalentNav(btcHeld, assetHeld, lastCandle.close);
     repo.insertNavPoint({
       timestamp: now,
       pairKey: pair.key,
       btcHeld,
       xautHeld: assetHeld,
       btcXautRatio: lastCandle.close,
-      btcEquivalentNav: computeBtcEquivalentNav(btcHeld, assetHeld, lastCandle.close),
+      btcEquivalentNav,
     });
+
+    // Bug found live Aug 2026 (round 3): the dashboard's "vs funded" per-pair
+    // yield/PnL line used to be measured against this pair's very
+    // first-ever recorded NAV point, frozen forever (#95/#101 - to stop it
+    // drifting on ordinary regime re-evaluation). That broke down the moment
+    // a REAL cross-pair reallocation happens (manual override change, or a
+    // regime-driven 100/0 <-> 50/50 transition): capital deliberately moved
+    // between pairs then reads as trading loss/gain against the stale
+    // baseline, producing misleading percentages. Re-baseline here to this
+    // pair's CURRENT value exactly when its target fraction actually
+    // changes since the last time the baseline was set (or hasn't been set
+    // yet) - ordinary ticks where the target is unchanged leave it alone,
+    // exactly like before, so this only resets on genuine reallocation
+    // events, not every tick.
+    const priorBaseline = repo.getFundingBaseline(pair.key);
+    const targetFractionChanged =
+      priorBaseline === undefined || Math.abs(priorBaseline.targetFractionAtSet - targetFraction) > 1e-9;
+    if (targetFractionChanged) {
+      repo.setFundingBaseline(pair.key, btcEquivalentNav, targetFraction, now);
+    }
   }
 
   return {

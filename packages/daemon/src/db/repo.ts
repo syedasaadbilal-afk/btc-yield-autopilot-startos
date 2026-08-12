@@ -312,6 +312,31 @@ export class Repo {
       .run(pairKey, fraction, Date.now());
   }
 
+  // ---- funding baseline (see migrations/008_funding_baseline.sql) ----
+  // The BTC-equivalent value a pair's "vs funded" yield/PnL line is measured
+  // against. Re-baselined to the pair's current value every time its
+  // cross-pair target fraction actually changes (a real reallocation, manual
+  // or regime-driven) - see loop.ts's gateAndExecute for where this is
+  // detected and reset.
+
+  getFundingBaseline(pairKey: string): { btcEquivalentNav: number; targetFractionAtSet: number; setAt: number } | undefined {
+    const row = this.db
+      .prepare("SELECT btc_equivalent_nav, target_fraction_at_set, set_at FROM funding_baseline WHERE pair_key = ?")
+      .get(pairKey) as { btc_equivalent_nav: number; target_fraction_at_set: number; set_at: number } | undefined;
+    return row
+      ? { btcEquivalentNav: row.btc_equivalent_nav, targetFractionAtSet: row.target_fraction_at_set, setAt: row.set_at }
+      : undefined;
+  }
+
+  setFundingBaseline(pairKey: string, btcEquivalentNav: number, targetFractionAtSet: number, setAt: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO funding_baseline (pair_key, btc_equivalent_nav, target_fraction_at_set, set_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(pair_key) DO UPDATE SET btc_equivalent_nav = excluded.btc_equivalent_nav, target_fraction_at_set = excluded.target_fraction_at_set, set_at = excluded.set_at`
+      )
+      .run(pairKey, btcEquivalentNav, targetFractionAtSet, setAt);
+  }
+
   // ---- manual cross-pair allocation override (see @autopilot/strategy's
   // computePortfolioAllocation) ----
   // Operator-set override of the XAUT/XMR split, dashboard Config tab

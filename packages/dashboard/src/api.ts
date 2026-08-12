@@ -26,6 +26,8 @@ export interface PairStatus {
   reason: string | null;
   distFromBaseline: number | null;
   btcEquivalentNav: number | null;
+  /** This pair's cost-basis baseline for the "vs funded" yield/PnL line - server-computed, re-baselined whenever a real cross-pair reallocation happens (see server.ts). */
+  fundedBtc: number;
   openTrade: unknown | null;
   /** Real live Bitfinex wallet balance of this pair's rotation asset (XAUT/XMR) - not the internal NAV ledger. Null if secrets unset or fetch failed. */
   realAssetHeld: number | null;

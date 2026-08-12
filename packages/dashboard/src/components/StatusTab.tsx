@@ -33,21 +33,6 @@ function statusHeadline(status: StatusResponse): string {
     .join(", ")} blue/gray - full allocation to the gold pair.`;
 }
 
-/**
- * Per-pair funded/cost-basis baseline (task #95/#101): use this pair's
- * FIRST-EVER recorded NAV point instead of a live-recomputed percentage of
- * total starting capital. capitalFractionBtc is the CURRENT dynamic
- * allocation (regime-driven, or manually overridden) and changes over time -
- * using it as a cost basis means "funded" silently shifts every time
- * allocation moves even though no new capital was actually deployed. hist is
- * ascending (repo.getNavHistory's ORDER BY timestamp ASC), so hist[0] is the
- * earliest recorded value; falls back to the fraction-based estimate only
- * before this pair has any NAV history yet (its very first tick).
- */
-function pairFundedBtc(hist: NavPoint[], fallback: number): number {
-  return hist.length > 0 ? hist[0]!.btcEquivalentNav : fallback;
-}
-
 export function StatusTab({
   status,
   navByPair,
@@ -73,14 +58,21 @@ export function StatusTab({
   // explicit direction: the hero no longer shows a "Funded" figure at all
   // (it was a recurring source of confusion, see #95/#101) - deployed
   // capital per pair is the more useful, always-self-consistent number.
-  // fundedByPair is still used further down inside each PairPanel's own
-  // mark-to-market vs cost-basis chart, which is a separate, still-valid view.
+  //
+  // fundedByPair now comes straight from the API (status.pairs[].fundedBtc,
+  // server-computed via funding_baseline - see server.ts) instead of being
+  // derived client-side from this pair's first-ever NAV history point. That
+  // old approach froze forever and read a deliberate cross-pair capital
+  // reallocation (manual override, or a regime-driven split change) as
+  // trading loss/gain against a stale baseline (bug found live Aug 2026,
+  // round 3). The server now re-baselines on every real reallocation event,
+  // so this stays correct without any client-side logic.
   let totalNav = 0;
   const fundedByPair: Record<string, number> = {};
   const deployedByPair: Record<string, number> = {};
   for (const pair of status.pairs) {
     const hist = navByPair[pair.pairKey] ?? [];
-    const funded = pairFundedBtc(hist, status.startingBtc * pair.capitalFractionBtc);
+    const funded = pair.fundedBtc;
     const nav = hist.length > 0 ? hist[hist.length - 1]!.btcEquivalentNav : funded;
     fundedByPair[pair.pairKey] = funded;
     deployedByPair[pair.pairKey] = nav;
