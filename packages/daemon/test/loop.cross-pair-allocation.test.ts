@@ -158,11 +158,26 @@ describe("cross-pair rotation & allocation (asymmetric regimes, daemon-level)", 
     const xaut2 = tick2.find((r) => r.pairKey === "xaut")!;
     const xmr2 = tick2.find((r) => r.pairKey === "xmr")!;
 
-    // XMR: own decision flipped flat -> long (exited on the regime reversal itself, not because of the allocator).
+    // XMR: own decision flipped flat -> long (Larsson wants to exit on the
+    // regime reversal itself, not because of the allocator) - but real PnL
+    // computation (task #86/loop.ts fix) means the tick-0 bootstrap "long"
+    // trade genuinely closed at a small loss at tick 1 (the ratio moved
+    // against holding BTC during that window), which correctly trips gate.ts's
+    // stop-out cooldown and blocks this re-entry. Before the PnL fix this
+    // could never happen - closeTrade was always hardcoded to "closed_win"
+    // regardless of what actually happened, so the cooldown gate was
+    // silently dead code. This is the gate working as designed, not a
+    // regression - targetFraction/decisionTarget still reflect what Larsson
+    // wants, gateAllowed/rotated reflect that the cooldown is blocking it.
     expect(xmr2.decisionTarget).toBe("long");
-    expect(xmr2.rotated).toBe(true);
+    expect(xmr2.gateAllowed).toBe(false);
+    expect(xmr2.gateReason).toMatch(/cooldown/i);
+    expect(xmr2.rotated).toBe(false);
     expect(xmr2.targetFraction).toBeCloseTo(0);
-    expect(repo.getAllocationFraction("xmr")).toBeCloseTo(0);
+    // Never actually applied since the gate blocked it before either resize
+    // branch could run - stays at tick 1's last-applied 50%, will retry once
+    // the cooldown clears.
+    expect(repo.getAllocationFraction("xmr")).toBeCloseTo(0.5);
 
     // XAUT: own decision did NOT flip (still flat/orange) - only the cross-pair
     // fraction moved (0.5 -> 1.0), so this must be the Case 2 resize path.

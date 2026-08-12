@@ -88,11 +88,22 @@ describe("cross-pair allocation resize + NAV mark-to-market", () => {
 
     expect(xautResult.targetFraction).toBeCloseTo(0.5);
     expect(xmrResult.targetFraction).toBeCloseTo(0.5);
+    // XAUT genuinely holds capital (2000 XAUT) to shrink from 100% -> 50%, so
+    // its resize actually moves real capital.
     expect(xautResult.rotated).toBe(true);
-    expect(xmrResult.rotated).toBe(true);
+    // XMR needs to GROW into its 50% share, funded from the pooled BTC
+    // wallet - but this fake client's getWallets() is a static snapshot (BTC
+    // balance 0) that doesn't reflect XAUT's same-tick sell settling, same as
+    // a real exchange where funds from one order haven't cleared before the
+    // next pair's resize is computed this same tick. Correctly capped to 0
+    // available and NOT marked applied (task #100 fix, live bug found Aug
+    // 2026: this used to be marked "applied" at 50% with zero capital
+    // actually moved, so the dashboard showed "on target" for a resize that
+    // never happened).
+    expect(xmrResult.rotated).toBe(false);
 
     expect(repo.getAllocationFraction("xaut")).toBeCloseTo(0.5);
-    expect(repo.getAllocationFraction("xmr")).toBeCloseTo(0.5);
+    expect(repo.getAllocationFraction("xmr")).toBeUndefined();
   });
 
   it("does not re-resize on a second tick when the target fraction hasn't changed, but NAV still marks to market with price", async () => {

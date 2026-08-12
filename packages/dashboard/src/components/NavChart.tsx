@@ -17,13 +17,15 @@ export function NavChart({
 }: {
   navHistory: NavPoint[];
   /**
-   * The pair's actual funded/allocated BTC capital (status.startingBtc *
-   * capitalFractionBtc) - NOT navHistory[0]. Yield/PnL must be measured
-   * against this to match packages/backtest/src/runLarssonBacktest.ts's
-   * totalBtcYieldFraction formula ((ending - startingBtc) / startingBtc);
-   * using navHistory[0] instead breaks the moment the earliest DB row is a
-   * stale/seed value (e.g. recorded before real capital was funded),
-   * producing a yield% unrelated to actual PnL.
+   * The pair's funded/cost-basis baseline. As of #95/#101, callers pass this
+   * pair's FIRST-EVER NAV point (navHistory[0]) rather than a live-recomputed
+   * percentage of total starting capital - capitalFractionBtc changes over
+   * time (regime shifts, manual overrides), so using it as a cost basis made
+   * "funded" silently drift every time allocation moved even though no new
+   * capital was actually deployed (confirmed live, Aug 2026: a pair's funded
+   * figure jumped the instant its target allocation changed). Yield/PnL here
+   * is measured against whatever the caller passes, same formula as
+   * packages/backtest/src/runLarssonBacktest.ts's totalBtcYieldFraction.
    */
   startingBtc: number;
   unit: DisplayUnit;

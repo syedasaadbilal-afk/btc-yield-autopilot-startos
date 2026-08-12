@@ -30,14 +30,14 @@ function Row({ label, value, valueClass = "text-slate-200" }: { label: string; v
 export function PairPanel({
   status,
   navHistory,
-  totalStartingBtc,
+  funded,
   unit,
   color,
 }: {
   status: PairStatus;
   navHistory: NavPoint[];
-  /** Daemon-wide funded capital (StatusResponse.startingBtc); scaled by capitalFractionBtc for this pair's yield/PnL baseline. */
-  totalStartingBtc: number;
+  /** This pair's funded/cost-basis baseline (StatusTab's pairFundedBtc: first-ever NAV point, not a live-recomputed fraction - see #95/#101). */
+  funded: number;
   unit: DisplayUnit;
   color: string;
 }) {
@@ -58,8 +58,8 @@ export function PairPanel({
 
   const heldAsset = status.currentPosition === "long" ? "BTC" : status.displayName.split(" ")[0];
   const decisionTargetLabel = status.decisionTarget === "long" ? "BTC" : status.displayName.split(" ")[0];
-  const pairStartingBtc = totalStartingBtc * status.capitalFractionBtc;
   const isRebalancing = status.decisionTarget !== status.currentPosition;
+  const resizeBlocked = Math.abs(status.capitalFractionBtc - status.appliedFractionBtc) > 0.001;
   return (
     <section className="bg-ink-900 border border-slate-800 rounded-lg p-4 space-y-3">
       <div className="flex items-start justify-between gap-2">
@@ -71,8 +71,15 @@ export function PairPanel({
         )}
       </div>
       <div className="border-t border-slate-800 pt-2">
-        <Row label="allocation" value={`${(status.capitalFractionBtc * 100).toFixed(0)}%`} />
-        <Row label="funded" value={formatBtcAmount(pairStartingBtc, unit)} />
+        <Row label="allocation" value={`${(status.appliedFractionBtc * 100).toFixed(0)}%`} />
+        {resizeBlocked && (
+          <Row
+            label=""
+            value={`target ${(status.capitalFractionBtc * 100).toFixed(0)}% blocked - below exchange minimum order size`}
+            valueClass="text-amber-400 text-xs"
+          />
+        )}
+        <Row label="funded" value={formatBtcAmount(funded, unit)} />
         <Row label="holding" value={heldAsset} />
         {status.distFromBaseline !== null && (
           <Row label="dist from baseline" value={`${(status.distFromBaseline * 100).toFixed(2)}%`} />
@@ -93,7 +100,7 @@ export function PairPanel({
       </div>
       {status.reason && <p className="text-xs text-slate-500 italic border-t border-slate-800 pt-2">"{status.reason}"</p>}
       <div className="border-t border-slate-800 pt-3">
-        <NavChart navHistory={navHistory} startingBtc={pairStartingBtc} unit={unit} color={color} compact />
+        <NavChart navHistory={navHistory} startingBtc={funded} unit={unit} color={color} compact />
       </div>
       <div className="border-t border-slate-800 pt-3">
         <h3 className="text-[11px] font-semibold tracking-wider text-slate-500 uppercase mb-2">Recent trades</h3>

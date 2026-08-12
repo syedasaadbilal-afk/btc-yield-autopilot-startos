@@ -27,6 +27,11 @@ async function main() {
   const repo = new Repo(db);
 
   if (!repo.getRunMode) throw new Error("Repo not wired correctly"); // defensive, cheap
+
+  // One-time-per-startup backfill for trades opened before migration 006
+  // (task #86) - see repo.ts's docstring. Idempotent (only touches rows
+  // still missing entry_price), so safe to run unconditionally every boot.
+  repo.backfillMissingEntryPrices();
   const existingMode = repo.getRunMode(INITIAL_RUN_MODE);
   repo.setRunMode(existingMode); // ensures the singleton row exists
 

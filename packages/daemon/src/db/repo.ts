@@ -187,6 +187,40 @@ export class Repo {
     return row !== undefined;
   }
 
+  /**
+   * Backfill entry_price for any currently-OPEN trade that predates the
+   * entry/exit price columns (migration 006, task #86) - without this, a
+   * trade opened before that migration deployed shows "-" for Entry/Exit/PnL
+   * indefinitely, since it's only ever set at insertTrade() time and this
+   * trade already exists. Uses the earliest NAV point at or after the
+   * trade's openedAt as a real historical approximation of the ratio price
+   * at entry (nav_points.btc_xaut_ratio is the same asset-per-BTC convention
+   * as entry_price/exit_price - see loop.ts's PnL formula), rather than
+   * leaving it blank until the trade closes and a new one opens, which for a
+   * regime-driven strategy can be weeks away. Safe to call on every daemon
+   * startup: only touches rows where entry_price IS NULL, so it's a no-op
+   * once backfilled, and self-corrects if a pair genuinely has no NAV
+   * history yet at the moment this runs (no matching row, nothing updated).
+   */
+  backfillMissingEntryPrices(): void {
+    const openTradesMissingEntry = (
+      this.db.prepare("SELECT * FROM trades WHERE status = 'open' AND entry_price IS NULL").all()
+    ).map(rowToTrade);
+    for (const trade of openTradesMissingEntry) {
+      const navRow = this.db
+        .prepare(
+          "SELECT btc_xaut_ratio FROM nav_points WHERE pair_key = ? AND timestamp >= ? ORDER BY timestamp ASC LIMIT 1"
+        )
+        .get(trade.pairKey ?? DEFAULT_PAIR_KEY, trade.openedAt) as { btc_xaut_ratio: number } | undefined;
+      if (navRow) {
+        this.db.prepare("UPDATE trades SET entry_price = ? WHERE id = ?").run(navRow.btc_xaut_ratio, trade.id);
+        console.log(
+          `[autopilot] backfilled entry_price=${navRow.btc_xaut_ratio} for pre-existing open trade ${trade.id} (${trade.pairKey ?? DEFAULT_PAIR_KEY}).`
+        );
+      }
+    }
+  }
+
   // ---- nav ----
 
   insertNavPoint(nav: NavPoint): void {

@@ -98,6 +98,13 @@ export async function createServer(opts: CreateServerOptions) {
         pairKey: pair.key,
         displayName: pair.displayName,
         capitalFractionBtc: targetFractionBtc,
+        // Last fraction actually PERSISTED (repo.getAllocationFraction) as
+        // opposed to targetFractionBtc above (what the regime/override wants
+        // right now) - these can disagree when a resize was attempted but
+        // blocked (e.g. below Bitfinex's minimum order size, see loop.ts's
+        // resizeBlocked handling), so the dashboard can show "blocked"
+        // instead of falsely claiming the target was reached.
+        appliedFractionBtc: opts.repo.getAllocationFraction(pair.key) ?? pair.capitalFractionBtc,
         currentPosition: lastResult?.currentPosition ?? (openTrade ? "long" : "flat"),
         decisionTarget: lastResult?.decisionTarget ?? latestDecision?.position ?? "flat",
         gateAllowed: lastResult?.gateAllowed ?? true,

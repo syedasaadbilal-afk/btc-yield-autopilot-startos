@@ -350,36 +350,64 @@ async function gateAndExecute(
         `[${pair.key}] tranche ${rd.trancheIndex} routed via "${rd.route}" (direct ${rd.directSlippageBtc.toFixed(6)} BTC vs usdt ${rd.usdtSlippageBtc.toFixed(6)} BTC estimated slippage)`
       );
     }
-    rotated = true;
-    executedBtcCapital = btcCapital;
-    executedDirection = decision.target === "long" ? "into_btc" : "into_asset";
 
-    if (decision.target === "long") {
-      const entryPrice = accountingCandles[accountingCandles.length - 1]!.close;
-      const stopAndTarget = computeStopAndTarget(accountingCandles, entryPrice, "long", config);
-      repo.insertTrade({
-        id: `${pair.key}-${now}`,
-        runMode,
-        pairKey: pair.key,
-        openedAt: now,
-        targetPosition: "long",
-        btcCapitalAtOpen: btcCapital,
-        riskFractionOfCapital: config.risk.riskFractionPerTrade,
-        entryPrice,
-        stopLossRatio: stopAndTarget.stopPrice,
-        firstTargetRatio: stopAndTarget.firstTargetPrice,
-        status: "open",
-        trancheExecutionPlanIds: [],
-      });
-    } else if (openTrade) {
-      const exitPrice = accountingCandles[accountingCandles.length - 1]?.close;
-      const pnl =
-        exitPrice !== undefined && openTrade.entryPrice !== undefined && openTrade.entryPrice > 0
-          ? openTrade.btcCapitalAtOpen * (1 - exitPrice / openTrade.entryPrice)
-          : 0;
-      repo.closeTrade(openTrade.id, pnl >= 0 ? "closed_win" : "closed_loss", pnl, exitPrice);
+    // Bug found live Aug 2026 (same class as the #100 resize fix): this used
+    // to unconditionally mark the flip as executed - inserting/closing a
+    // trade row and persisting the new allocation fraction - even when every
+    // tranche got skipped (executeResult.totalBtcMoved === 0, e.g. below
+    // Bitfinex's minimum order size). That recorded a flip that never
+    // actually happened. Only commit the flip's bookkeeping when real
+    // capital moved; otherwise leave everything as-is so the position/trade
+    // state stays consistent with reality and this tick's decision is
+    // naturally retried next tick.
+    if (executeResult.totalBtcMoved <= 0) {
+      console.warn(
+        `[${pair.key}] flip to "${decision.target}" could not execute - every tranche was below Bitfinex's minimum order size or unroutable. NOT recording a trade/allocation change; will retry next tick.`
+      );
+    } else {
+      rotated = true;
+      executedBtcCapital = btcCapital;
+      executedDirection = decision.target === "long" ? "into_btc" : "into_asset";
+
+      if (decision.target === "long") {
+        const entryPrice = accountingCandles[accountingCandles.length - 1]!.close;
+        const stopAndTarget = computeStopAndTarget(accountingCandles, entryPrice, "long", config);
+        repo.insertTrade({
+          id: `${pair.key}-${now}`,
+          runMode,
+          pairKey: pair.key,
+          openedAt: now,
+          targetPosition: "long",
+          btcCapitalAtOpen: btcCapital,
+          riskFractionOfCapital: config.risk.riskFractionPerTrade,
+          entryPrice,
+          stopLossRatio: stopAndTarget.stopPrice,
+          firstTargetRatio: stopAndTarget.firstTargetPrice,
+          status: "open",
+          trancheExecutionPlanIds: [],
+        });
+      } else if (openTrade) {
+        // Realized PnL for a "long" (BTC-holding) trade is the opportunity-cost
+        // capture versus staying in the asset the whole time: btcCapitalAtOpen
+        // stays fixed in BTC terms while held (holding BTC can't itself produce
+        // a BTC-denominated gain), so the real signal is how the ratio moved.
+        // btcXautRatio/entryPrice/exitPrice are ASSET-per-BTC (see nav.ts,
+        // larssonRotation.ts's "r = XAUT per BTC" convention) - counterfactual
+        // asset units if we'd stayed in the asset = btcCapitalAtOpen *
+        // entryPrice; converting that back to BTC at exitPrice gives
+        // (btcCapitalAtOpen * entryPrice) / exitPrice, so PnL = actual BTC held
+        // minus that counterfactual = btcCapitalAtOpen * (1 - entryPrice /
+        // exitPrice). A rising ratio (BTC buys more asset over time) while long
+        // BTC means the bet paid off -> positive PnL, confirmed by hand.
+        const exitPrice = accountingCandles[accountingCandles.length - 1]?.close;
+        const pnl =
+          exitPrice !== undefined && exitPrice > 0 && openTrade.entryPrice !== undefined
+            ? openTrade.btcCapitalAtOpen * (1 - openTrade.entryPrice / exitPrice)
+            : 0;
+        repo.closeTrade(openTrade.id, pnl >= 0 ? "closed_win" : "closed_loss", pnl, exitPrice);
+      }
+      repo.setAllocationFraction(pair.key, targetFraction);
     }
-    repo.setAllocationFraction(pair.key, targetFraction);
   } else if (gateResult.allow && currentPosition === "flat") {
     const lastAppliedFraction = repo.getAllocationFraction(pair.key);
     const fractionChanged =
@@ -399,6 +427,18 @@ async function gateAndExecute(
       const DUST_FRACTION_OF_PORTFOLIO = 0.001;
       const dustThresholdBtc = totalPortfolioBtc * DUST_FRACTION_OF_PORTFOLIO;
 
+      // Tracks whether a real resize was attempted but every tranche got
+      // skipped for being below Bitfinex's minimum order size (bug found
+      // live, Aug 2026): repo.setAllocationFraction used to run unconditionally
+      // after this block, so a resize that moved ZERO real capital still got
+      // marked as "applied" - the dashboard then showed the new target as
+      // "on target" even though nothing actually happened on the exchange,
+      // and the daemon would never retry since fractionChanged would read
+      // false on the next tick. Only skip the persist when a resize was
+      // genuinely attempted and failed to move anything; the PAUSED branch
+      // and the "within dust threshold, nothing to do" case both still mark
+      // the fraction as applied, matching prior behavior.
+      let resizeBlocked = false;
       if (Math.abs(delta) > dustThresholdBtc) {
         const increasing = delta > 0;
         if (increasing && runMode === "PAUSED") {
@@ -417,12 +457,21 @@ async function gateAndExecute(
               `[${pair.key}] resize tranche ${rd.trancheIndex} routed via "${rd.route}" (direct ${rd.directSlippageBtc.toFixed(6)} BTC vs usdt ${rd.usdtSlippageBtc.toFixed(6)} BTC estimated slippage)`
             );
           }
-          rotated = true;
-          executedBtcCapital = resizeBtcCapital;
-          executedDirection = increasing ? "into_asset" : "into_btc";
+          if (executeResult.totalBtcMoved <= 0) {
+            resizeBlocked = true;
+            console.warn(
+              `[${pair.key}] resize to ${(targetFraction * 100).toFixed(0)}% could not execute - every tranche was below Bitfinex's minimum order size. NOT marking as applied; will retry next tick.`
+            );
+          } else {
+            rotated = true;
+            executedBtcCapital = resizeBtcCapital;
+            executedDirection = increasing ? "into_asset" : "into_btc";
+          }
         }
       }
-      repo.setAllocationFraction(pair.key, targetFraction);
+      if (!resizeBlocked) {
+        repo.setAllocationFraction(pair.key, targetFraction);
+      }
     } else if (idleTopUpBtc > 0) {
       // Case 2b: steady state - this pair's target fraction hasn't changed
       // since it was last established (a stable 50/50 split or a stable

@@ -1,6 +1,6 @@
 import type { NavPoint, RunMode } from "@autopilot/shared";
 import type { StatusResponse } from "../api.js";
-import { formatBtcAmount, formatCountdown, formatPercent, type DisplayUnit } from "../format.js";
+import { formatBtcAmount, formatCountdown, type DisplayUnit } from "../format.js";
 import { RunModeToggle } from "./RunModeToggle.js";
 import { MetricTile } from "./MetricTile.js";
 import { PairPanel } from "./PairPanel.js";
@@ -19,11 +19,33 @@ function statusHeadline(status: StatusResponse): string {
     return "Both pairs blue/gray - portfolio effectively sits in BTC.";
   }
   if (gold.length === status.pairs.length) {
-    return `All pairs gold (${gold.map((p) => p.displayName.split(" ")[0]).join(", ")}) - split evenly.`;
+    // Report the REAL split (capitalFractionBtc), not a hardcoded "split
+    // evenly" - a manual allocation override (Config tab) can pin this away
+    // from 50/50 even when both pairs are gold (bug found live, Aug 2026:
+    // this said "split evenly" while the tiles right below it showed 40/60).
+    const splitDesc = gold
+      .map((p) => `${p.displayName.split(" ")[0]} ${(p.capitalFractionBtc * 100).toFixed(0)}%`)
+      .join(", ");
+    return `All pairs gold (${splitDesc}).`;
   }
   return `${gold.map((p) => p.displayName.split(" ")[0]).join(", ")} gold, ${others
     .map((p) => p.displayName.split(" ")[0])
     .join(", ")} blue/gray - full allocation to the gold pair.`;
+}
+
+/**
+ * Per-pair funded/cost-basis baseline (task #95/#101): use this pair's
+ * FIRST-EVER recorded NAV point instead of a live-recomputed percentage of
+ * total starting capital. capitalFractionBtc is the CURRENT dynamic
+ * allocation (regime-driven, or manually overridden) and changes over time -
+ * using it as a cost basis means "funded" silently shifts every time
+ * allocation moves even though no new capital was actually deployed. hist is
+ * ascending (repo.getNavHistory's ORDER BY timestamp ASC), so hist[0] is the
+ * earliest recorded value; falls back to the fraction-based estimate only
+ * before this pair has any NAV history yet (its very first tick).
+ */
+function pairFundedBtc(hist: NavPoint[], fallback: number): number {
+  return hist.length > 0 ? hist[0]!.btcEquivalentNav : fallback;
 }
 
 export function StatusTab({
@@ -45,33 +67,49 @@ export function StatusTab({
     return <div className="text-slate-500 p-6">Loading...</div>;
   }
 
+  // Per-pair "deployed" = this pair's current mark-to-market BTC-equivalent
+  // NAV (navByPair's latest point) - by construction, summing these across
+  // pairs always equals totalNav exactly, since totalNav IS that sum. Per
+  // explicit direction: the hero no longer shows a "Funded" figure at all
+  // (it was a recurring source of confusion, see #95/#101) - deployed
+  // capital per pair is the more useful, always-self-consistent number.
+  // fundedByPair is still used further down inside each PairPanel's own
+  // mark-to-market vs cost-basis chart, which is a separate, still-valid view.
   let totalNav = 0;
-  const totalFunded = status.startingBtc;
+  const fundedByPair: Record<string, number> = {};
+  const deployedByPair: Record<string, number> = {};
   for (const pair of status.pairs) {
-    const funded = status.startingBtc * pair.capitalFractionBtc;
     const hist = navByPair[pair.pairKey] ?? [];
-    totalNav += hist.length > 0 ? hist[hist.length - 1]!.btcEquivalentNav : funded;
+    const funded = pairFundedBtc(hist, status.startingBtc * pair.capitalFractionBtc);
+    const nav = hist.length > 0 ? hist[hist.length - 1]!.btcEquivalentNav : funded;
+    fundedByPair[pair.pairKey] = funded;
+    deployedByPair[pair.pairKey] = nav;
+    totalNav += nav;
   }
-  const portfolioPnl = totalNav - totalFunded;
-  const portfolioYield = totalFunded > 0 ? portfolioPnl / totalFunded : 0;
 
   return (
     <div className="space-y-6 p-6">
       {/* Hero: matches Hashrate Autopilot's green PRICE/DELIVERED panel + status/action panel */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="bg-emerald-950/40 border border-emerald-900 rounded-lg p-5 space-y-4">
+          <div>
+            <div className="text-[11px] tracking-wider text-slate-500 uppercase mb-1">Portfolio NAV</div>
+            <div className="text-4xl font-bold text-slate-100">{formatBtcAmount(totalNav, unit)}</div>
+          </div>
+          {/* BTC capital currently deployed per pair (last actual rebalancing
+              result, not a target %) - always sums exactly to Portfolio NAV
+              above, since both are derived from the same per-pair NAV data. */}
           <div className="flex flex-wrap gap-8">
-            <div>
-              <div className="text-[11px] tracking-wider text-slate-500 uppercase mb-1">Portfolio NAV</div>
-              <div className="text-4xl font-bold text-slate-100">{formatBtcAmount(totalNav, unit)}</div>
-              <div className={`text-sm font-semibold mt-1 ${portfolioPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                {formatPercent(portfolioYield)} ({formatBtcAmount(portfolioPnl, unit, { signed: true })})
+            {status.pairs.map((pair) => (
+              <div key={pair.pairKey}>
+                <div className="text-[11px] tracking-wider text-slate-500 uppercase mb-1">
+                  {pair.displayName.split(" ")[0]} deployed
+                </div>
+                <div className="text-lg font-semibold text-slate-300">
+                  {formatBtcAmount(deployedByPair[pair.pairKey] ?? 0, unit)}
+                </div>
               </div>
-            </div>
-            <div>
-              <div className="text-[11px] tracking-wider text-slate-500 uppercase mb-1">Funded</div>
-              <div className="text-2xl font-semibold text-slate-300">{formatBtcAmount(totalFunded, unit)}</div>
-            </div>
+            ))}
           </div>
           <RunModeToggle current={status.runMode} onChange={onModeChange} />
         </div>
@@ -113,15 +151,22 @@ export function StatusTab({
       </div>
       {/* Metric tile row - matches Hashrate Autopilot's UPTIME/POOL LUCK/BLOCK HEIGHT row */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        {status.pairs.map((pair) => (
-          <MetricTile
-            key={`${pair.pairKey}-alloc`}
-            label={`${pair.displayName.split(" ")[0]} allocation`}
-            value={`${(pair.capitalFractionBtc * 100).toFixed(0)}%`}
-            sublabel={pair.regime ?? "no regime yet"}
-            valueColor={pair.regime === "orange" ? "text-amber-400" : "text-slate-100"}
-          />
-        ))}
+        {status.pairs.map((pair) => {
+          const resizeBlocked = Math.abs(pair.capitalFractionBtc - pair.appliedFractionBtc) > 0.001;
+          return (
+            <MetricTile
+              key={`${pair.pairKey}-alloc`}
+              label={`${pair.displayName.split(" ")[0]} allocation`}
+              value={`${(pair.appliedFractionBtc * 100).toFixed(0)}%`}
+              sublabel={
+                resizeBlocked
+                  ? `target ${(pair.capitalFractionBtc * 100).toFixed(0)}% blocked - below exchange minimum`
+                  : (pair.regime ?? "no regime yet")
+              }
+              valueColor={resizeBlocked ? "text-amber-400" : pair.regime === "orange" ? "text-amber-400" : "text-slate-100"}
+            />
+          );
+        })}
         {status.pairs.map((pair) => (
           <MetricTile
             key={`${pair.pairKey}-pos`}
@@ -157,12 +202,12 @@ export function StatusTab({
             key={pair.pairKey}
             status={pair}
             navHistory={navByPair[pair.pairKey] ?? []}
-            totalStartingBtc={status.startingBtc}
+            funded={fundedByPair[pair.pairKey] ?? 0}
             unit={unit}
             color={PAIR_COLORS[pair.pairKey] ?? "#34d399"}
           />
         ))}
-        <PortfolioPnl status={status} navByPair={navByPair} unit={unit} />
+        <PortfolioPnl status={status} unit={unit} />
       </div>
     </div>
   );

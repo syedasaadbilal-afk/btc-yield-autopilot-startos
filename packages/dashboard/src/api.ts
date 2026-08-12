@@ -14,6 +14,8 @@ export interface PairStatus {
    * -> 0/0 (100% effectively sits in BTC).
    */
   capitalFractionBtc: number;
+  /** Last fraction actually persisted/applied - can differ from capitalFractionBtc (the current target) when a resize was attempted but blocked, e.g. below Bitfinex's minimum order size. */
+  appliedFractionBtc: number;
   currentPosition: "flat" | "long";
   decisionTarget: "flat" | "long";
   gateAllowed: boolean;
