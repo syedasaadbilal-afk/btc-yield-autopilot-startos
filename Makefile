@@ -16,6 +16,16 @@ pull-image:
 	@echo "Removing any locally cached image to force a fresh pull..."
 	-docker rmi -f $(IMAGE) 2>/dev/null
 	docker pull $(IMAGE)
+	@# Bug found live Aug 2026: s9pk.mk's packing rule only reruns when local
+	@# source files or .git/HEAD/.index are newer than the existing .s9pk -
+	@# it has no idea the *remote* image we just pulled changed, so a stale
+	@# .s9pk built from an old cached image gets silently reused (still
+	@# prints "Build Complete" with the current git hash, since that comes
+	@# from local git state, not from what's actually baked into the image).
+	@# Deleting any existing .s9pk here guarantees the next pack step has no
+	@# choice but to actually run, every single time.
+	@echo "Removing any existing .s9pk so the next pack step is forced to rebuild..."
+	-rm -f $(PACKAGE_ID)*.s9pk
 
 deploy: pull-image arch/x86_64 install
 	@echo "Deploy complete - fresh image pulled, packed, and installed."
