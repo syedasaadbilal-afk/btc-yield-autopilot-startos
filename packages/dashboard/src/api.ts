@@ -1,4 +1,4 @@
-import type { NavPoint, RunMode, StrategyConfig, Trade } from "@autopilot/shared";
+import type { ExecutionLogEntry, NavPoint, RunMode, StrategyConfig, Trade } from "@autopilot/shared";
 
 /** What GET /api/config returns - the active strategy config minus the legacy (unused) sections. */
 export type ActiveStrategyConfig = Omit<StrategyConfig, "regime" | "confluence" | "contrarian" | "rotation">;
@@ -80,6 +80,11 @@ export async function fetchNavHistory(pairKey: string): Promise<NavPoint[]> {
 
 export async function fetchTrades(pairKey: string, limit = 100): Promise<Trade[]> {
   return (await getJson<Trade[]>(`/api/trades?pairKey=${pairKey}&limit=${limit}`)) ?? [];
+}
+
+/** Every real execution attempt for this pair - flip entry/exit, cross-pair resizes, idle top-ups. */
+export async function fetchExecutions(pairKey: string, limit = 100): Promise<ExecutionLogEntry[]> {
+  return (await getJson<ExecutionLogEntry[]>(`/api/executions?pairKey=${pairKey}&limit=${limit}`)) ?? [];
 }
 
 export async function fetchConfig(): Promise<ActiveStrategyConfig | undefined> {

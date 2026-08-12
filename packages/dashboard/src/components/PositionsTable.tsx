@@ -19,38 +19,42 @@ function formatPrice(price: number | undefined): string {
  * stacked rows - Exit on top, Entry below, same order TradingView uses -
  * sharing one Trade#/Type/Net PnL/Return via rowSpan. The columns are
  * exactly Trade #, Type, Date and time, Price, Size, Net PnL, Return - no
- * extra columns, to match the reference format precisely. A still-OPEN
- * trade (no exit yet) renders as a single row instead, since there's no
- * exit price/PnL to pair it with.
+ * extra columns, to match the reference format precisely.
+ *
+ * Only CLOSED round-trip trades are shown (bug found live Aug 2026): this
+ * used to also render a single row for still-open/cancelled trades, which
+ * meant a leftover bootstrap-inferred row (the daemon's first-ever
+ * reconciliation with the real wallet, not a real trade) showed up looking
+ * like "XMR entered" when XMR has never actually entered Monero. TradingView's
+ * own List of Trades only ever lists closed trades for the same reason - an
+ * open position has no exit price/PnL to report yet.
  */
 export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: DisplayUnit }) {
-  if (trades.length === 0) {
-    return <div className="text-sm text-slate-500 py-4">No trades recorded yet.</div>;
-  }
-  const ordered = [...trades].reverse(); // most recent trade first, matches the reference
   const closed = trades.filter((t) => t.status === "closed_win" || t.status === "closed_loss");
-  const wins = trades.filter((t) => t.status === "closed_win").length;
+  if (closed.length === 0) {
+    return <div className="text-sm text-slate-500 py-4">No closed trades yet.</div>;
+  }
+  const ordered = [...closed].reverse(); // most recent trade first, matches the reference
+  const wins = closed.filter((t) => t.status === "closed_win").length;
   const totalNetPnl = closed.reduce((sum, t) => sum + (t.realizedBtcPnl ?? 0), 0);
-  const winRate = closed.length > 0 ? (wins / closed.length) * 100 : null;
+  const winRate = (wins / closed.length) * 100;
 
   return (
     <div className="space-y-3">
-      {closed.length > 0 && (
-        <div className="flex flex-wrap gap-6 text-xs text-slate-400 border-b border-slate-800 pb-3">
-          <span>
-            Closed trades: <span className="text-slate-200 font-medium">{closed.length}</span>
+      <div className="flex flex-wrap gap-6 text-xs text-slate-400 border-b border-slate-800 pb-3">
+        <span>
+          Closed trades: <span className="text-slate-200 font-medium">{closed.length}</span>
+        </span>
+        <span>
+          Win rate: <span className="text-slate-200 font-medium">{winRate.toFixed(0)}%</span>
+        </span>
+        <span>
+          Net PnL:{" "}
+          <span className={`font-medium ${totalNetPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+            {formatBtcAmount(totalNetPnl, unit, { signed: true })}
           </span>
-          <span>
-            Win rate: <span className="text-slate-200 font-medium">{winRate!.toFixed(0)}%</span>
-          </span>
-          <span>
-            Net PnL:{" "}
-            <span className={`font-medium ${totalNetPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-              {formatBtcAmount(totalNetPnl, unit, { signed: true })}
-            </span>
-          </span>
-        </div>
-      )}
+        </span>
+      </div>
       <table className="w-full text-xs text-left text-slate-300">
         <thead className="text-slate-500 uppercase tracking-wide">
           <tr>
@@ -66,28 +70,8 @@ export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: Displa
         <tbody>
           {ordered.map((t, i) => {
             const tradeNumber = ordered.length - i;
-            const isClosed = t.status === "closed_win" || t.status === "closed_loss";
             const pnlColor =
               t.realizedBtcPnl === undefined ? "" : t.realizedBtcPnl >= 0 ? "text-emerald-400" : "text-red-400";
-
-            if (!isClosed) {
-              // Open or cancelled - single row, no exit leg to pair it with yet.
-              return (
-                <tr key={t.id} className="border-t border-slate-800">
-                  <td className="py-1.5 pr-3 text-slate-500 align-top">{tradeNumber}</td>
-                  <td className="py-1.5 pr-3 text-sky-400 align-top">long</td>
-                  <td className="py-1.5 pr-3 whitespace-nowrap">
-                    <span className="text-slate-500 mr-1">Entry</span>
-                    {new Date(t.openedAt).toLocaleDateString()}
-                  </td>
-                  <td className="py-1.5 pr-3">{formatPrice(t.entryPrice)}</td>
-                  <td className="py-1.5 pr-3">{formatBtcAmount(t.btcCapitalAtOpen, unit)}</td>
-                  <td className="py-1.5 pr-3 text-slate-500" colSpan={2}>
-                    {t.status}
-                  </td>
-                </tr>
-              );
-            }
 
             return (
               <Fragment key={t.id}>

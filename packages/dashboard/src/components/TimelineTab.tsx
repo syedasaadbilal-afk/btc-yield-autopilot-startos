@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
-import type { Trade } from "@autopilot/shared";
-import { fetchHistory, fetchTrades, type DecisionRow, type StatusResponse } from "../api.js";
+import type { ExecutionLogEntry, Trade } from "@autopilot/shared";
+import { fetchExecutions, fetchHistory, fetchTrades, type DecisionRow, type StatusResponse } from "../api.js";
 import type { DisplayUnit } from "../format.js";
 import { DecisionHistory } from "./DecisionHistory.js";
+import { ExecutionsTable } from "./ExecutionsTable.js";
 import { PositionsTable } from "./PositionsTable.js";
 
-/** Timeline tab: per-pair trade log + regime decision history, matching Hashrate Autopilot's Timeline tab. */
+/** Timeline tab: per-pair execution log + trade PnL + regime decision history, matching Hashrate Autopilot's Timeline tab. */
 export function TimelineTab({ status, unit }: { status: StatusResponse | undefined; unit: DisplayUnit }) {
   const [selectedPair, setSelectedPair] = useState<string | undefined>(undefined);
+  const [executions, setExecutions] = useState<ExecutionLogEntry[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [decisions, setDecisions] = useState<DecisionRow[]>([]);
 
@@ -17,8 +19,13 @@ export function TimelineTab({ status, unit }: { status: StatusResponse | undefin
     if (!pairKey) return;
     let cancelled = false;
     async function load() {
-      const [t, d] = await Promise.all([fetchTrades(pairKey!, 100), fetchHistory(pairKey!, 100)]);
+      const [ex, t, d] = await Promise.all([
+        fetchExecutions(pairKey!, 100),
+        fetchTrades(pairKey!, 100),
+        fetchHistory(pairKey!, 100),
+      ]);
       if (!cancelled) {
+        setExecutions(ex);
         setTrades(t);
         setDecisions(d);
       }
@@ -54,7 +61,18 @@ export function TimelineTab({ status, unit }: { status: StatusResponse | undefin
       </div>
 
       <div className="bg-ink-900 border border-slate-800 rounded-lg p-4">
-        <h3 className="text-xs font-semibold tracking-wider text-slate-300 uppercase mb-3">Trades</h3>
+        <h3 className="text-xs font-semibold tracking-wider text-slate-300 uppercase mb-3">
+          Executions (resizes, USDT-leg trades, entries/exits)
+        </h3>
+        <div className="overflow-x-auto">
+          <ExecutionsTable executions={executions} unit={unit} />
+        </div>
+      </div>
+
+      <div className="bg-ink-900 border border-slate-800 rounded-lg p-4">
+        <h3 className="text-xs font-semibold tracking-wider text-slate-300 uppercase mb-3">
+          Trades (closed entry/exit round trips only)
+        </h3>
         <div className="overflow-x-auto">
           <PositionsTable trades={trades} unit={unit} />
         </div>

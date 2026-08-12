@@ -160,7 +160,9 @@ export function StatusTab({
               value={`${(pair.appliedFractionBtc * 100).toFixed(0)}%`}
               sublabel={
                 resizeBlocked
-                  ? `target ${(pair.capitalFractionBtc * 100).toFixed(0)}% blocked - below exchange minimum`
+                  ? pair.currentPosition === "flat"
+                    ? `target ${(pair.capitalFractionBtc * 100).toFixed(0)}% blocked - below exchange minimum`
+                    : `target ${(pair.capitalFractionBtc * 100).toFixed(0)}% - waiting for own regime to go gold`
                   : (pair.regime ?? "no regime yet")
               }
               valueColor={resizeBlocked ? "text-amber-400" : pair.regime === "orange" ? "text-amber-400" : "text-slate-100"}

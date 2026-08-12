@@ -149,6 +149,17 @@ export async function createServer(opts: CreateServerOptions) {
     const limit = Math.min(Number(q.limit ?? 100) || 100, 500);
     return opts.repo.getRecentTrades(pairKey, limit);
   });
+
+  // Everything that actually moved (or tried to move) capital on the
+  // exchange - flip entry/exit, cross-pair resizes, idle top-ups - distinct
+  // from /api/trades, which only tracks flat<->long round trips. Powers the
+  // Timeline tab's execution log (explicit user request, Aug 2026).
+  fastify.get("/api/executions", async (req) => {
+    const q = req.query as { pairKey?: string; limit?: string };
+    const pairKey = q.pairKey ?? DEFAULT_STRATEGY_CONFIG.pairs[0]!.key;
+    const limit = Math.min(Number(q.limit ?? 100) || 100, 500);
+    return opts.repo.getRecentExecutions(pairKey, limit);
+  });
   // Read-only diagnostic snapshot of internal position-tracking state per
   // pair - added Aug 2026 after a stuck-open-trade bug (a bootstrap-inferred
   // trade left "open" by pre-fix code) took over an hour to diagnose via

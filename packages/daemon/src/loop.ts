@@ -350,6 +350,17 @@ async function gateAndExecute(
         `[${pair.key}] tranche ${rd.trancheIndex} routed via "${rd.route}" (direct ${rd.directSlippageBtc.toFixed(6)} BTC vs usdt ${rd.usdtSlippageBtc.toFixed(6)} BTC estimated slippage)`
       );
     }
+    repo.insertExecutionLog({
+      id: `${pair.key}-${now}-flip`,
+      pairKey: pair.key,
+      timestamp: now,
+      kind: decision.target === "long" ? "flip_entry" : "flip_exit",
+      side,
+      requestedBtc: btcCapital,
+      movedBtc: executeResult.totalBtcMoved,
+      status: executeResult.totalBtcMoved > 0 ? "executed" : "blocked",
+      routes: executeResult.routeDecisions.map((rd) => rd.route).join(","),
+    });
 
     // Bug found live Aug 2026 (same class as the #100 resize fix): this used
     // to unconditionally mark the flip as executed - inserting/closing a
@@ -457,6 +468,17 @@ async function gateAndExecute(
               `[${pair.key}] resize tranche ${rd.trancheIndex} routed via "${rd.route}" (direct ${rd.directSlippageBtc.toFixed(6)} BTC vs usdt ${rd.usdtSlippageBtc.toFixed(6)} BTC estimated slippage)`
             );
           }
+          repo.insertExecutionLog({
+            id: `${pair.key}-${now}-resize`,
+            pairKey: pair.key,
+            timestamp: now,
+            kind: "resize",
+            side,
+            requestedBtc: resizeBtcCapital,
+            movedBtc: executeResult.totalBtcMoved,
+            status: executeResult.totalBtcMoved > 0 ? "executed" : "blocked",
+            routes: executeResult.routeDecisions.map((rd) => rd.route).join(","),
+          });
           if (executeResult.totalBtcMoved <= 0) {
             resizeBlocked = true;
             console.warn(
@@ -499,6 +521,17 @@ async function gateAndExecute(
             `[${pair.key}] top-up tranche ${rd.trancheIndex} routed via "${rd.route}" (direct ${rd.directSlippageBtc.toFixed(6)} BTC vs usdt ${rd.usdtSlippageBtc.toFixed(6)} BTC estimated slippage)`
           );
         }
+        repo.insertExecutionLog({
+          id: `${pair.key}-${now}-topup`,
+          pairKey: pair.key,
+          timestamp: now,
+          kind: "topup",
+          side: "sell_btc_for_xaut",
+          requestedBtc: idleTopUpBtc,
+          movedBtc: executeResult.totalBtcMoved,
+          status: executeResult.totalBtcMoved > 0 ? "executed" : "blocked",
+          routes: executeResult.routeDecisions.map((rd) => rd.route).join(","),
+        });
         rotated = true;
         executedBtcCapital = idleTopUpBtc;
         executedDirection = "into_asset";
@@ -530,8 +563,23 @@ async function gateAndExecute(
         btcHeld = 0;
       }
     } else if (prevNav) {
-      btcHeld = prevNav.btcHeld;
-      assetHeld = prevNav.xautHeld;
+      // Bug found live Aug 2026: this used to carry forward prevNav.btcHeld
+      // UNCHANGED for every non-rotating tick, regardless of position. That's
+      // correct for a "flat" pair (it genuinely still holds the exact same
+      // number of gold coins until a real trade changes that - only the
+      // price used to value them should move). It's wrong for a "long" pair:
+      // "long" means holding no distinct asset of its own, just a notional
+      // share of the shared/pooled BTC wallet - that share should track the
+      // CURRENT totalPortfolioBtc * targetFraction every tick, the same
+      // formula the very-first-tick fallback below already uses. Freezing it
+      // meant a pair that has never once rotated (e.g. XMR, still waiting
+      // for its own regime to go gold) displayed a stale "deployed" figure
+      // from whatever its first-ever tick happened to compute, never
+      // updating again even as the real portfolio and other pairs' resizes
+      // changed around it - looked like real capital sitting in XMR when the
+      // live wallet showed XMR holding nothing at all.
+      btcHeld = positionAfter === "long" ? totalPortfolioBtc * targetFraction : 0;
+      assetHeld = positionAfter === "flat" ? prevNav.xautHeld : 0;
     } else {
       const fallbackBtc = totalPortfolioBtc * targetFraction;
       btcHeld = positionAfter === "long" ? fallbackBtc : 0;

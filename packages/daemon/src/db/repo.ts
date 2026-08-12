@@ -1,4 +1,4 @@
-import type { NavPoint, RunMode, StrategyDecision, Trade } from "@autopilot/shared";
+import type { ExecutionLogEntry, NavPoint, RunMode, StrategyDecision, Trade } from "@autopilot/shared";
 import type { LarssonDayResult, RotationDayResult } from "@autopilot/strategy";
 import type { DatabaseSyncLike } from "./types.js";
 
@@ -221,6 +221,40 @@ export class Repo {
     }
   }
 
+  // ---- execution log ----
+  // Separate from `trades`: this records every real executeRotation() call -
+  // flip entry/exit, cross-pair resizes, and idle-capital top-ups - so the
+  // Timeline tab can show everything that actually moved capital on the
+  // exchange, while the Status tab's trade table stays focused on just
+  // entry/exit round-trip PnL (explicit user direction, Aug 2026).
+
+  insertExecutionLog(entry: ExecutionLogEntry): void {
+    this.db
+      .prepare(
+        `INSERT INTO execution_log (id, pair_key, timestamp, kind, side, requested_btc, moved_btc, status, routes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        entry.id,
+        entry.pairKey,
+        entry.timestamp,
+        entry.kind,
+        entry.side,
+        entry.requestedBtc,
+        entry.movedBtc,
+        entry.status,
+        entry.routes
+      );
+  }
+
+  /** Most recent execution attempts for this pair, newest first - powers the Timeline tab. */
+  getRecentExecutions(pairKey: string = DEFAULT_PAIR_KEY, limit = 100): ExecutionLogEntry[] {
+    const rows = this.db
+      .prepare("SELECT * FROM execution_log WHERE pair_key = ? ORDER BY timestamp DESC LIMIT ?")
+      .all(pairKey, limit);
+    return rows.map(rowToExecutionLogEntry);
+  }
+
   // ---- nav ----
 
   insertNavPoint(nav: NavPoint): void {
@@ -335,6 +369,21 @@ function rowToTrade(row: unknown): Trade {
     ...(pairKey !== null ? { pairKey } : {}),
     ...(entryPrice !== null ? { entryPrice } : {}),
     ...(exitPrice !== null ? { exitPrice } : {}),
+  };
+}
+
+function rowToExecutionLogEntry(row: unknown): ExecutionLogEntry {
+  const r = row as Record<string, unknown>;
+  return {
+    id: r.id as string,
+    pairKey: r.pair_key as string,
+    timestamp: r.timestamp as number,
+    kind: r.kind as ExecutionLogEntry["kind"],
+    side: r.side as ExecutionLogEntry["side"],
+    requestedBtc: r.requested_btc as number,
+    movedBtc: r.moved_btc as number,
+    status: r.status as ExecutionLogEntry["status"],
+    routes: r.routes as string,
   };
 }
 

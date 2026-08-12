@@ -4,5 +4,6 @@ export * from "./marketData.js";
 export * from "./signal.js";
 export * from "./execution.js";
 export * from "./trade.js";
+export * from "./executionLog.js";
 export * from "./nav.js";
 export * from "./config.js";
