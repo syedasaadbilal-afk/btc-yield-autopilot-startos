@@ -1,5 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { fetchBitfinexSecretsStatus, fetchConfig, saveBitfinexSecrets, type ActiveStrategyConfig } from "../api.js";
+import {
+  fetchAllocationOverride,
+  fetchBitfinexSecretsStatus,
+  fetchConfig,
+  saveAllocationOverride,
+  saveBitfinexSecrets,
+  type ActiveStrategyConfig,
+} from "../api.js";
 
 function Row({ label, value }: { label: string; value: string }) {
   return (
@@ -83,6 +90,72 @@ function BitfinexCredentials() {
   );
 }
 
+function AllocationOverride() {
+  const [enabled, setEnabled] = useState(false);
+  const [xautPct, setXautPct] = useState(50);
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState<string | undefined>(undefined);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    fetchAllocationOverride().then((o) => {
+      setEnabled(o.enabled);
+      setXautPct(Math.round(o.xautFraction * 100));
+      setLoaded(true);
+    });
+  }, []);
+
+  async function handleSave() {
+    setSaving(true);
+    const result = await saveAllocationOverride(enabled, xautPct / 100);
+    setSaving(false);
+    setNote(result ? "Saved. Takes effect on the next tick." : "Failed to save - check the daemon is reachable.");
+  }
+
+  return (
+    <ConfigSection title="XAUT/XMR allocation override">
+      <label className="flex items-center gap-2 pb-2 text-xs text-slate-400">
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={!loaded}
+          onChange={(e) => setEnabled(e.target.checked)}
+        />
+        Manually pin the split (overrides the regime-driven default)
+      </label>
+      <div className="space-y-2">
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={xautPct}
+            disabled={!enabled || !loaded}
+            onChange={(e) => setXautPct(Number(e.target.value))}
+            className="flex-1 disabled:opacity-40"
+          />
+          <span className="text-sm text-slate-200 w-32 text-right shrink-0">
+            XAUT {xautPct}% / XMR {100 - xautPct}%
+          </span>
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={saving || !loaded}
+          className="px-3 py-1.5 rounded text-sm font-medium bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-50 border border-slate-700"
+        >
+          {saving ? "Saving..." : "Save allocation"}
+        </button>
+        {note && <p className="text-xs text-amber-400">{note}</p>}
+        <p className="text-xs text-slate-600">
+          Each pair's own entry/exit still runs independently off its Larsson regime - this only changes the split
+          used while both pairs are eligible to hold their asset. No change here means no trade; changing it triggers
+          exactly one resize toward the new split.
+        </p>
+      </div>
+    </ConfigSection>
+  );
+}
+
 /** Read-only strategy config snapshot - matches Hashrate Autopilot's BRAIINS/DATUM/OCEAN detail-panel style. */
 export function ConfigTab() {
   const [config, setConfig] = useState<ActiveStrategyConfig | undefined>(undefined);
@@ -98,12 +171,14 @@ export function ConfigTab() {
   return (
     <div className="space-y-4 p-6">
       <p className="text-xs text-slate-500">
-        Live, running config for this daemon - not the dashboard bundle's build-time defaults. Editing isn't wired up yet;
-        change PairConfig/StrategyConfig and redeploy to update.
+        Live, running config for this daemon - not the dashboard bundle's build-time defaults. Only the Bitfinex
+        credentials and the XAUT/XMR allocation override below are editable from here; everything else requires
+        changing PairConfig/StrategyConfig and redeploying.
       </p>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <BitfinexCredentials />
+        <AllocationOverride />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

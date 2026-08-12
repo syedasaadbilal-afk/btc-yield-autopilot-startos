@@ -235,6 +235,34 @@ export class Repo {
       )
       .run(pairKey, fraction, Date.now());
   }
+
+  // ---- manual cross-pair allocation override (see @autopilot/strategy's
+  // computePortfolioAllocation) ----
+  // Operator-set override of the XAUT/XMR split, dashboard Config tab
+  // (task #89/#93). Distinct from allocation_state above, which tracks the
+  // LAST APPLIED fraction (used to detect whether a resize is needed); this
+  // is the desired fraction the operator has asked for. When enabled, it
+  // replaces computePortfolioAllocation()'s regime-driven split in loop.ts;
+  // when disabled (default), behavior is unchanged from before this
+  // feature existed. Stored as a single xautFraction (0-1) - XMR's share is
+  // always 1 - xautFraction, so the two can never disagree/sum wrong.
+  getAllocationOverride(): { enabled: boolean; xautFraction: number } {
+    const row = this.db.prepare("SELECT enabled, xaut_fraction FROM allocation_override WHERE id = 1").get() as
+      | { enabled: number; xaut_fraction: number }
+      | undefined;
+    return row
+      ? { enabled: row.enabled === 1, xautFraction: row.xaut_fraction }
+      : { enabled: false, xautFraction: 0.5 };
+  }
+
+  setAllocationOverride(enabled: boolean, xautFraction: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO allocation_override (id, enabled, xaut_fraction, updated_at) VALUES (1, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, xaut_fraction = excluded.xaut_fraction, updated_at = excluded.updated_at`
+      )
+      .run(enabled ? 1 : 0, xautFraction, Date.now());
+  }
 }
 
 function rowToTrade(row: unknown): Trade {

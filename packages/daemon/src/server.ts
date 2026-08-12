@@ -220,6 +220,28 @@ export async function createServer(opts: CreateServerOptions) {
     return { mode };
   });
 
+  // Manual cross-pair allocation override (task #89/#93) - lets the operator
+  // pin the XAUT/XMR split from the dashboard instead of always taking
+  // computePortfolioAllocation()'s regime-driven value. See loop.ts for how
+  // this interacts with (and can never override) each pair's own
+  // entry/exit signal.
+  fastify.get("/api/allocation-override", async () => opts.repo.getAllocationOverride());
+
+  fastify.put("/api/allocation-override", async (req, reply) => {
+    const body = req.body as { enabled?: boolean; xautFraction?: number } | undefined;
+    const enabled = body?.enabled;
+    const xautFraction = body?.xautFraction;
+    if (typeof enabled !== "boolean" || typeof xautFraction !== "number" || xautFraction < 0 || xautFraction > 1) {
+      reply.code(400);
+      return { error: "enabled must be boolean, xautFraction must be a number between 0 and 1" };
+    }
+    opts.repo.setAllocationOverride(enabled, xautFraction);
+    console.log(
+      `[autopilot] allocation override changed via dashboard -> enabled=${enabled}, xaut=${(xautFraction * 100).toFixed(0)}%`
+    );
+    return { enabled, xautFraction };
+  });
+
   // "Run decision now" - matches the button pattern from Hashrate Autopilot's
   // dashboard. Fires the same tick() the interval timer uses; responds
   // immediately since a tick can take a while (candle fetches, order

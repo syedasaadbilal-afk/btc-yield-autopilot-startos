@@ -102,6 +102,29 @@ export async function saveBitfinexSecrets(apiKey: string, apiSecret: string): Pr
   }
 }
 
+export interface AllocationOverride {
+  enabled: boolean;
+  xautFraction: number;
+}
+
+export async function fetchAllocationOverride(): Promise<AllocationOverride> {
+  return (await getJson<AllocationOverride>("/api/allocation-override")) ?? { enabled: false, xautFraction: 0.5 };
+}
+
+export async function saveAllocationOverride(enabled: boolean, xautFraction: number): Promise<AllocationOverride | undefined> {
+  try {
+    const res = await fetch("/api/allocation-override", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled, xautFraction }),
+    });
+    if (!res.ok) return undefined;
+    return (await res.json()) as AllocationOverride;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function setRunMode(mode: RunMode): Promise<void> {
   await fetch("/api/run-mode", {
     method: "PUT",

@@ -542,7 +542,22 @@ export async function runControlLoopIteration(deps: LoopDeps): Promise<PairLoopR
   if (useCrossPairAllocation) {
     const xautRegime = observations.find((o) => o.pair.key === "xaut")?.today.regime as LarssonRegime;
     const xmrRegime = observations.find((o) => o.pair.key === "xmr")?.today.regime as LarssonRegime;
-    allocation = computePortfolioAllocation({ xautRegime, xmrRegime });
+    const regimeAllocation = computePortfolioAllocation({ xautRegime, xmrRegime });
+    // Manual override (task #89/#93): operator-set split from the dashboard
+    // Config tab, persisted in allocation_override. When enabled, this
+    // REPLACES the regime-driven split above wholesale for SIZING purposes
+    // only - it can never force a pair to hold an asset its own Larsson
+    // regime says to exit, since that flip is decided independently a few
+    // lines below in gateAndExecute by comparing decision.target (=
+    // today.position, driven solely by replayLarssonRotation) against
+    // currentPosition, with zero dependency on targetFraction. A pair whose
+    // own regime says "exit to BTC" still exits regardless of the
+    // override's split; the override only changes how a pair that's
+    // currently eligible to hold its asset gets sized/resized.
+    const override = deps.repo.getAllocationOverride();
+    allocation = override.enabled
+      ? { xaut: override.xautFraction, xmr: 1 - override.xautFraction }
+      : regimeAllocation;
   }
 
   // Both pairs gold this tick <=> computePortfolioAllocation's exact 50/50
