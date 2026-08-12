@@ -142,6 +142,38 @@ export async function createServer(opts: CreateServerOptions) {
     const limit = Math.min(Number(q.limit ?? 100) || 100, 500);
     return opts.repo.getRecentTrades(pairKey, limit);
   });
+  // Read-only diagnostic snapshot of internal position-tracking state per
+  // pair - added Aug 2026 after a stuck-open-trade bug (a bootstrap-inferred
+  // trade left "open" by pre-fix code) took over an hour to diagnose via
+  // SSH/container/volume archaeology, because nothing exposed openTrade /
+  // hasLiveTrade / dbDerivedPosition anywhere queryable. This exposes
+  // exactly the inputs that drive loop.ts's currentPosition computation so
+  // future issues can be diagnosed with one HTTP call instead of hunting for
+  // the live DB file across container mount namespaces.
+  fastify.get("/api/debug/state", async () => {
+    const runMode = opts.repo.getRunMode();
+    const pairs = DEFAULT_STRATEGY_CONFIG.pairs.map((pair) => {
+      const openTrade = opts.repo.getOpenTrade(pair.key);
+      const hasLiveTrade = opts.repo.hasLiveTrade(pair.key);
+      const latestNav = opts.repo.getLatestNavPoint(pair.key);
+      const isFirstTickForPair = latestNav === undefined;
+      const needsLiveBootstrapCheck = runMode === "LIVE" && !hasLiveTrade;
+      const dbDerivedPosition = openTrade ? "long" : "flat";
+      const latestDecision = opts.repo.getLatestLarssonDecision(pair.key);
+      return {
+        pairKey: pair.key,
+        openTrade: openTrade ?? null,
+        hasLiveTrade,
+        isFirstTickForPair,
+        needsBootstrapCheck: isFirstTickForPair || needsLiveBootstrapCheck,
+        dbDerivedPosition,
+        latestNavAt: latestNav?.timestamp ?? null,
+        latestDecision: latestDecision ?? null,
+        recentTrades: opts.repo.getRecentTrades(pair.key, 5),
+      };
+    });
+    return { runMode, generatedAt: Date.now(), pairs };
+  });
 
   // Read-only strategy config snapshot for the dashboard's Config tab (design
   // doc: "no rebuild to tune" - this is what's ACTUALLY running, not just

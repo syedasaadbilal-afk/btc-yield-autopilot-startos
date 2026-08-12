@@ -169,11 +169,6 @@ async function observeAndDecide(deps: LoopDeps & { pair: PairConfig }): Promise<
       })
     : dbDerivedPosition;
 
-  // TEMP DIAGNOSTIC (Aug 2026 stuck-position investigation) - remove once resolved.
-  console.log(
-    `[${pair.key}] DIAG: openTrade=${openTrade ? `${openTrade.id}(${openTrade.status},target=${openTrade.targetPosition})` : "null"}, hasLiveTrade=${repo.hasLiveTrade(pair.key)}, isFirstTickForPair=${isFirstTickForPair}, needsBootstrapCheck=${needsBootstrapCheck}, dbDerivedPosition=${dbDerivedPosition}, currentPosition=${currentPosition}`
-  );
-
   if (needsBootstrapCheck && currentPosition !== dbDerivedPosition) {
     if (currentPosition === "long" && !openTrade) {
       const bootstrapEntryPrice = accountingCandles[accountingCandles.length - 1]?.close ?? 0;
