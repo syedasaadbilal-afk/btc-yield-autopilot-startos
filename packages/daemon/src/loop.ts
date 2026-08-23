@@ -248,6 +248,19 @@ async function observeAndDecide(deps: LoopDeps & { pair: PairConfig }): Promise<
 export interface WalletBasis {
   totalPortfolioBtc: number;
   currentValueByPairKey: Record<string, number>;
+  /**
+   * RAW asset-unit balance (e.g. XAUT units, not BTC-equivalent) for each
+   * currently-flat pair, read straight from the live wallet this tick. Kept
+   * separate from currentValueByPairKey (BTC-denominated) so a "deposit
+   * recognition" NAV resync (see gateAndExecute) can use these units
+   * directly instead of round-tripping through a BTC-equivalent conversion
+   * and back - that round trip uses two DIFFERENT price snapshots
+   * (observe-time vs accounting-time last-candle close), which even a tiny
+   * divergence between them turns into spurious asset-unit drift on every
+   * single tick, not just on a real deposit (bug found while regression
+   * testing the Aug 2026 round-4 deposit-recognition fix).
+   */
+  assetBalanceByPairKey: Record<string, number>;
   btcBalance: number;
   source: "wallet" | "internal_nav_fallback";
 }
@@ -262,12 +275,14 @@ async function computeWalletBasis(
     const wallets = await client.getWallets();
     const btcBalance = wallets.find((w) => w.currency === "BTC")?.balance ?? 0;
     const currentValueByPairKey: Record<string, number> = {};
+    const assetBalanceByPairKey: Record<string, number> = {};
     let assetsTotalBtc = 0;
     for (const o of observations) {
       if (o.currentPosition === "flat") {
         const assetBalance = wallets.find((w) => w.currency === o.pair.assetCurrency)?.balance ?? 0;
         const valueBtc = assetBalance * o.btcPerAssetPrice;
         currentValueByPairKey[o.pair.key] = valueBtc;
+        assetBalanceByPairKey[o.pair.key] = assetBalance;
         assetsTotalBtc += valueBtc;
       } else {
         currentValueByPairKey[o.pair.key] = 0;
@@ -275,7 +290,7 @@ async function computeWalletBasis(
     }
     const totalPortfolioBtc = btcBalance + assetsTotalBtc;
     if (totalPortfolioBtc > 0) {
-      return { totalPortfolioBtc, currentValueByPairKey, btcBalance, source: "wallet" };
+      return { totalPortfolioBtc, currentValueByPairKey, assetBalanceByPairKey, btcBalance, source: "wallet" };
     }
     console.warn("[walletBasis] wallet read returned a zero/empty total, falling back to internal NAV tracking.");
   } catch (err) {
@@ -290,7 +305,7 @@ async function computeWalletBasis(
   for (const o of observations) {
     currentValueByPairKey[o.pair.key] = repo.getLatestNavPoint(o.pair.key)?.btcEquivalentNav ?? 0;
   }
-  return { totalPortfolioBtc, currentValueByPairKey, btcBalance: 0, source: "internal_nav_fallback" };
+  return { totalPortfolioBtc, currentValueByPairKey, assetBalanceByPairKey: {}, btcBalance: 0, source: "internal_nav_fallback" };
 }
 
 /**
@@ -315,7 +330,9 @@ async function gateAndExecute(
   totalPortfolioBtc: number,
   currentRealValueBtc: number,
   isDualGoldState: boolean,
-  idleTopUpBtc: number
+  idleTopUpBtc: number,
+  /** RAW asset-unit balance from the live wallet this tick, when this pair is currently flat and the wallet read succeeded - undefined otherwise. See WalletBasis.assetBalanceByPairKey. */
+  liveAssetBalance: number | undefined
 ): Promise<PairLoopResult> {
   const { client, repo, config } = deps;
   const now = deps.now ?? Date.now();
@@ -354,7 +371,17 @@ async function gateAndExecute(
       id: `${pair.key}-${now}-flip`,
       pairKey: pair.key,
       timestamp: now,
-      kind: decision.target === "long" ? "flip_entry" : "flip_exit",
+      // Bug found live Aug 2026 (round 5): this was backwards. "long" means
+      // moving TO holding pooled BTC - i.e. EXITING the rotation asset - and
+      // "flat" means moving TO holding the asset - i.e. ENTERING it. The
+      // `side` line right below already gets this correct (target==="long"
+      // -> buy_btc_with_xaut, selling the asset for BTC, an exit), but this
+      // `kind` line was checking the same condition and assigning the
+      // OPPOSITE label - a real BTC->XMR entry got logged and displayed as
+      // "Exit", confirmed live when the very first-ever entry into XMR
+      // showed up on the Timeline tab labeled "Exit (asset -> BTC)" despite
+      // the side column correctly reading "BTC -> asset" on the same row.
+      kind: decision.target === "long" ? "flip_exit" : "flip_entry",
       side,
       requestedBtc: btcCapital,
       movedBtc: executeResult.totalBtcMoved,
@@ -578,12 +605,45 @@ async function gateAndExecute(
       // updating again even as the real portfolio and other pairs' resizes
       // changed around it - looked like real capital sitting in XMR when the
       // live wallet showed XMR holding nothing at all.
+      //
+      // Bug found live Aug 2026 (round 4, "new deposit not being recognized"):
+      // the "flat" side had the SAME class of bug - prevNav.xautHeld was
+      // carried forward completely unchanged on every non-rotating tick, so
+      // a deposit landing directly in the wallet (not via a daemon-executed
+      // trade) was invisible to the internal ledger forever, even though the
+      // real trading math (walletBasis.totalPortfolioBtc, used to size every
+      // resize) already reads the live wallet fresh every tick and was NEVER
+      // actually affected - this was purely a display/NAV-tracking gap.
+      // Resync assetHeld directly from liveAssetBalance (this pair's RAW
+      // asset-unit balance, read straight from the wallet this tick) whenever
+      // we have one. An earlier version of this fix re-derived assetHeld by
+      // converting currentRealValueBtc (BTC-equivalent) back to asset units
+      // via the current candle close - that round-trips through TWO
+      // different price snapshots (the observe-time close used to compute
+      // currentRealValueBtc, and the accounting-time close used to convert
+      // back), so even a one-candle difference between those two windows
+      // during a smooth price ramp produced spurious asset-unit drift on
+      // EVERY tick, not just on a real deposit (caught by
+      // loop.resize.test.ts's mark-to-market regression test). Using the raw
+      // wallet units directly avoids that round trip entirely. Falls back to
+      // the old carry-forward behavior when there's no live read this tick
+      // (liveAssetBalance undefined - wallet read failed, or this pair
+      // wasn't flat at observe time).
       btcHeld = positionAfter === "long" ? totalPortfolioBtc * targetFraction : 0;
-      assetHeld = positionAfter === "flat" ? prevNav.xautHeld : 0;
+      assetHeld = positionAfter === "flat" ? (liveAssetBalance ?? prevNav.xautHeld) : 0;
     } else {
+      // Same live-wallet-first preference as above, for this pair's very
+      // first-ever NAV point (no prevNav yet): prefer the real wallet
+      // balance over the target-fraction approximation when we have one -
+      // caught by loop.resize.test.ts once the branch above started using
+      // the real balance too (this fallback's approximation and the real
+      // wallet balance are two different numbers whenever the pooled BTC
+      // wallet doesn't split in EXACTLY the target ratio, which is the
+      // common case), for the same "trust the live read when we have it"
+      // reason.
       const fallbackBtc = totalPortfolioBtc * targetFraction;
       btcHeld = positionAfter === "long" ? fallbackBtc : 0;
-      assetHeld = positionAfter === "flat" ? fallbackBtc * lastCandle.close : 0;
+      assetHeld = positionAfter === "flat" ? (liveAssetBalance ?? fallbackBtc * lastCandle.close) : 0;
     }
 
     const btcEquivalentNav = computeBtcEquivalentNav(btcHeld, assetHeld, lastCandle.close);
@@ -738,7 +798,8 @@ export async function runControlLoopIteration(deps: LoopDeps): Promise<PairLoopR
           walletBasis.totalPortfolioBtc,
           walletBasis.currentValueByPairKey[obs.pair.key] ?? 0,
           isDualGoldState,
-          idleTopUpByPairKey[obs.pair.key] ?? 0
+          idleTopUpByPairKey[obs.pair.key] ?? 0,
+          walletBasis.source === "wallet" ? (walletBasis.assetBalanceByPairKey[obs.pair.key] ?? undefined) : undefined
         )
       );
     } catch (err) {

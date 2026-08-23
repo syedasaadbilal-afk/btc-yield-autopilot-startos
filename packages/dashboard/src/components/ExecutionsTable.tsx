@@ -2,7 +2,7 @@ import type { ExecutionLogEntry } from "@autopilot/shared";
 import { formatBtcAmount, type DisplayUnit } from "../format.js";
 
 const KIND_LABELS: Record<ExecutionLogEntry["kind"], string> = {
-  flip_entry: "Enter (BTC → asset exit)",
+  flip_entry: "Entry (BTC → asset)",
   flip_exit: "Exit (asset → BTC)",
   resize: "Resize",
   topup: "Idle top-up",

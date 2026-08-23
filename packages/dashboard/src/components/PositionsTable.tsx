@@ -9,8 +9,21 @@ function formatReturn(pnl: number | undefined, capital: number): string {
   return `${sign}${pct.toFixed(2)}%`;
 }
 
+/**
+ * entryPrice/exitPrice are stored internally in this project's own ratio
+ * convention (asset units per 1 BTC - e.g. "169.49 XMR per BTC" - see
+ * nav.ts's btcXautRatio), NOT the natural direct pair quote everyone reads
+ * on an exchange or TradingView (BTC per 1 unit of asset - e.g. "0.0059
+ * BTC/XMR"). Displaying the raw internal number caused real, confirmed
+ * confusion trying to cross-check a fill against TradingView/Bitfinex (bug
+ * found live Aug 2026, round 5): the numbers weren't wrong, just inverted
+ * relative to what a normal price quote looks like. Invert here, for
+ * display only - the internal storage/calculation convention is left
+ * untouched everywhere else (strategy math, backtest comparisons, etc.),
+ * this is purely a presentation fix.
+ */
 function formatPrice(price: number | undefined): string {
-  return price !== undefined ? price.toFixed(6) : "-";
+  return price !== undefined && price > 0 ? (1 / price).toFixed(8) : "-";
 }
 
 /**
