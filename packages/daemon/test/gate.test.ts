@@ -79,7 +79,7 @@ describe("gate", () => {
     expect(result.allow).toBe(true);
   });
 
-  it("trips the drawdown circuit breaker on a new entry after a large BTC NAV decline", () => {
+  it("does NOT block an exit-to-BTC after a large BTC NAV decline (round 8: the drawdown breaker used to trap the account in the losing asset instead of letting it rotate to safety)", () => {
     const navHistory = [
       { timestamp: 0, btcHeld: 3, xautHeld: 0, btcXautRatio: 10, btcEquivalentNav: 3 },
       { timestamp: 1, btcHeld: 2.5, xautHeld: 0, btcXautRatio: 10, btcEquivalentNav: 2.5 },
@@ -92,8 +92,8 @@ describe("gate", () => {
       navHistory,
       config: DEFAULT_STRATEGY_CONFIG,
     });
-    expect(result.allow).toBe(false);
-    expect(result.reason).toMatch(/drawdown/i);
+    expect(result.allow).toBe(true);
+    expect(result.reason).not.toMatch(/drawdown/i);
   });
 });
 

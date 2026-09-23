@@ -32,7 +32,7 @@ export interface GateResult {
  * denominated state per design doc Section 0.
  */
 export function gate(input: GateInput): GateResult {
-  const { runMode, currentPosition, decision, now, lastStopOutAt, navHistory, config } = input;
+  const { runMode, currentPosition, decision, now, lastStopOutAt, config } = input;
   const isEntering = decision.target === "long" && currentPosition === "flat";
   const isExiting = decision.target === "flat" && currentPosition === "long";
 
@@ -57,16 +57,22 @@ export function gate(input: GateInput): GateResult {
     }
   }
 
-  // Drawdown circuit breaker, computed on the BTC-equivalent NAV curve (design doc Section 0).
-  if (isEntering) {
-    const drawdown = currentBtcDrawdownFraction(navHistory);
-    if (drawdown >= config.risk.drawdownCircuitBreakerFraction) {
-      return {
-        allow: false,
-        reason: `BTC drawdown circuit breaker tripped: ${(drawdown * 100).toFixed(1)}% from peak BTC NAV.`,
-      };
-    }
-  }
+  // Drawdown circuit breaker: REMOVED (bug found live Sep 2026, round 8) -
+  // "isEntering" in this bot means flipping OUT of the rotation asset and
+  // INTO pooled BTC, i.e. exiting the losing position, not chasing a new
+  // risky one. Gating that transition on a NAV decline doesn't protect
+  // against anything - it does the opposite, trapping the account in
+  // whichever asset already dropped instead of letting the regime signal
+  // rotate it to safety. Confirmed live: XAUT's regime correctly called for
+  // an exit to BTC and was blocked here at up to 69% "drawdown" (partly a
+  // stale-peak accounting bug, fixed separately via funding_baseline
+  // filtering - but even the TRUE post-fix ~31% reading kept blocking a
+  // real exit). Per explicit instruction: the live daemon must match the
+  // backtested Larsson Baseline + Overextension Rotation strategy on
+  // TradingView exactly, which has no such gate and already executed this
+  // exit. currentBtcDrawdownFraction is kept below (still config-displayed
+  // on the Config tab, and available for future read-only reporting) but no
+  // longer blocks any gate decision.
 
   return { allow: true, reason: "Gate checks passed." };
 }
