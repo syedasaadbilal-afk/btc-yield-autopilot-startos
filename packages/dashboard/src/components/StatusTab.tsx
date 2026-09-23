@@ -53,11 +53,10 @@ export function StatusTab({
   }
 
   // Per-pair "deployed" = this pair's current mark-to-market BTC-equivalent
-  // NAV (navByPair's latest point) - by construction, summing these across
-  // pairs always equals totalNav exactly, since totalNav IS that sum. Per
-  // explicit direction: the hero no longer shows a "Funded" figure at all
-  // (it was a recurring source of confusion, see #95/#101) - deployed
-  // capital per pair is the more useful, always-self-consistent number.
+  // NAV (navByPair's latest point). Per explicit direction: the hero no
+  // longer shows a "Funded" figure at all (it was a recurring source of
+  // confusion, see #95/#101) - deployed capital per pair is the more
+  // useful, always-self-consistent number.
   //
   // fundedByPair now comes straight from the API (status.pairs[].fundedBtc,
   // server-computed via funding_baseline - see server.ts) instead of being
@@ -67,7 +66,20 @@ export function StatusTab({
   // trading loss/gain against a stale baseline (bug found live Aug 2026,
   // round 3). The server now re-baselines on every real reallocation event,
   // so this stays correct without any client-side logic.
-  let totalNav = 0;
+  //
+  // Bug found live Aug 2026 (round 6, "balance reconciled?"): Portfolio NAV
+  // used to be ONLY the sum of deployed-per-pair values, silently excluding
+  // any idle/undeployed BTC sitting in the wallet (waiting for the next
+  // tick's idle-topup sweep - see loop.ts). That made the headline number
+  // read noticeably lower than the account's real total balance whenever
+  // idle capital was sitting around, which is confusing for a figure
+  // literally labeled "Portfolio NAV" - confirmed live comparing this
+  // against the real Bitfinex wallet total. Portfolio NAV now includes
+  // realBtcHeld (already shown separately below as its own tile) so the
+  // headline number matches the account's true total value; the per-pair
+  // "deployed" tiles below no longer sum to exactly this number by
+  // themselves - the difference is whatever's shown in "BTC held (live)".
+  let deployedNav = 0;
   const fundedByPair: Record<string, number> = {};
   const deployedByPair: Record<string, number> = {};
   for (const pair of status.pairs) {
@@ -76,8 +88,9 @@ export function StatusTab({
     const nav = hist.length > 0 ? hist[hist.length - 1]!.btcEquivalentNav : funded;
     fundedByPair[pair.pairKey] = funded;
     deployedByPair[pair.pairKey] = nav;
-    totalNav += nav;
+    deployedNav += nav;
   }
+  const totalNav = deployedNav + (status.realBtcHeld ?? 0);
 
   return (
     <div className="space-y-6 p-6">

@@ -340,7 +340,30 @@ async function gateAndExecute(
   const decision = { target: today.position };
 
   const runMode = repo.getRunMode();
-  const navHistory = repo.getNavHistory(pair.key);
+  // Bug found live Aug 2026 (round 7, real money stuck): the drawdown
+  // circuit breaker (gate.ts's currentBtcDrawdownFraction) used this pair's
+  // FULL nav history unfiltered, so its "peak" could be from before a
+  // deliberate cross-pair reallocation (e.g. XAUT going from a much bigger
+  // allocation down to 45% when the operator set a manual override) - a
+  // benign reallocation, not a trading loss, but it reads identically to a
+  // real drawdown in raw btcEquivalentNav terms. Confirmed live: XAUT's
+  // Larsson signal correctly called for an exit to BTC on Aug 23 (regime
+  // turned gray), but the circuit breaker tripped at "64% from peak BTC
+  // NAV" every single tick since - blocking the real exit and leaving
+  // capital stuck in a declining position for 4+ days - because its
+  // all-time peak was from when XAUT held ~100% of the portfolio, long
+  // before the operator's 45/55 override moved most of that capital to XMR.
+  // funding_baseline (see #113-116) already solves exactly this class of
+  // problem for the "vs funded" PnL display by re-baselining on every real
+  // reallocation; reuse it here too, filtering the drawdown breaker's view
+  // of nav history to only points since the last real reallocation so a
+  // legitimate capital move never gets mistaken for a loss.
+  const fundingBaseline = repo.getFundingBaseline(pair.key);
+  const fullNavHistory = repo.getNavHistory(pair.key);
+  const navHistory =
+    fundingBaseline !== undefined
+      ? fullNavHistory.filter((p) => p.timestamp >= fundingBaseline.setAt)
+      : fullNavHistory;
   const lastStopOutAt = repo.getLastStopOutAt(pair.key);
   const gateResult = gate({
     runMode,
@@ -442,7 +465,11 @@ async function gateAndExecute(
           exitPrice !== undefined && exitPrice > 0 && openTrade.entryPrice !== undefined
             ? openTrade.btcCapitalAtOpen * (1 - openTrade.entryPrice / exitPrice)
             : 0;
-        repo.closeTrade(openTrade.id, pnl >= 0 ? "closed_win" : "closed_loss", pnl, exitPrice);
+        // Stamp closed_at with this iteration's `now` (not a fresh Date.now())
+        // so it stays consistent with the cooldown-gate clock elsewhere in
+        // this same tick, and so tests can drive a deterministic clock end
+        // to end via deps.now instead of racing the real wall clock.
+        repo.closeTrade(openTrade.id, pnl >= 0 ? "closed_win" : "closed_loss", pnl, exitPrice, now);
       }
       repo.setAllocationFraction(pair.key, targetFraction);
     }
@@ -756,28 +783,52 @@ export async function runControlLoopIteration(deps: LoopDeps): Promise<PairLoopR
   // Steer any idle/top-up BTC sitting in the wallet (a fresh deposit, manual
   // funding, leftover dust, etc.) toward whichever pair should receive it -
   // never by selling the other pair's existing holding, only by buying with
-  // capital that wasn't invested anywhere yet. In a dual-gold 50/50 state,
-  // that's whichever pair currently holds less BTC-equivalent value; in a
-  // single-gold 100/0 state, that's the one pair currently at 100%. Only
-  // computed off a real wallet read, since the internal-NAV fallback can't
-  // tell idle capital apart from ordinary price drift.
+  // capital that wasn't invested anywhere yet. Only computed off a real
+  // wallet read, since the internal-NAV fallback can't tell idle capital
+  // apart from ordinary price drift.
+  //
+  // Bug found live Aug 2026 (round 6, "BTC balance not deploying"): this
+  // used to special-case exactly two shapes - true 50/50 dual-gold
+  // (isDualGoldState) and exactly-100/0 single-gold - and route idle BTC to
+  // "whichever pair holds less" or "the one pair at 100%" respectively. A
+  // manual allocation override that splits capital any OTHER way (e.g. the
+  // operator setting XAUT 45% / XMR 55% from the Config tab) matched
+  // neither shape: isDualGoldState requires an EXACT 50/50 match, and
+  // neither 0.45 nor 0.55 is >= 1 - 1e-9, so `fullTargetKey` fell through to
+  // undefined and idleTopUpByPairKey was silently left empty - forever, on
+  // every tick, for as long as the override stayed active. Confirmed live:
+  // 0.0010327 BTC sat idle in the wallet across multiple ticks (including a
+  // manually-triggered "Run decision now") while both pairs read "on
+  // target".
+  //
+  // Fixed generally instead of adding a third special case: for every pair
+  // with a positive target allocation, compute how far its current
+  // BTC-equivalent value sits below its OWN target (targetFraction *
+  // totalPortfolioBtc), and route the idle BTC to whichever pair has the
+  // largest such deficit. This reduces to the old dual-gold behavior at an
+  // exact 50/50 split and the old single-gold behavior at 100/0, but also
+  // handles any manual override split, or more than two pairs, correctly.
   const idleTopUpByPairKey: Record<string, number> = {};
   if (allocation !== undefined && walletBasis.source === "wallet") {
     const DUST_FRACTION_OF_PORTFOLIO = 0.001;
     const dustThresholdBtc = walletBasis.totalPortfolioBtc * DUST_FRACTION_OF_PORTFOLIO;
     const idleBtc = walletBasis.btcBalance;
     if (idleBtc > dustThresholdBtc) {
-      if (isDualGoldState) {
-        const xautValue = walletBasis.currentValueByPairKey["xaut"] ?? 0;
-        const xmrValue = walletBasis.currentValueByPairKey["xmr"] ?? 0;
-        const underrepresentedKey = xautValue <= xmrValue ? "xaut" : "xmr";
-        idleTopUpByPairKey[underrepresentedKey] = idleBtc;
-      } else {
-        const fullTargetKey =
-          allocation.xaut >= 1 - 1e-9 ? "xaut" : allocation.xmr >= 1 - 1e-9 ? "xmr" : undefined;
-        if (fullTargetKey) {
-          idleTopUpByPairKey[fullTargetKey] = idleBtc;
+      let mostUnderweightKey: string | undefined;
+      let largestDeficitBtc = 0;
+      for (const key of Object.keys(allocation) as Array<keyof typeof allocation>) {
+        const targetFraction = allocation[key] ?? 0;
+        if (targetFraction <= 0) continue;
+        const targetBtc = targetFraction * walletBasis.totalPortfolioBtc;
+        const currentBtc = walletBasis.currentValueByPairKey[key] ?? 0;
+        const deficitBtc = targetBtc - currentBtc;
+        if (deficitBtc > largestDeficitBtc) {
+          largestDeficitBtc = deficitBtc;
+          mostUnderweightKey = key;
         }
+      }
+      if (mostUnderweightKey) {
+        idleTopUpByPairKey[mostUnderweightKey] = idleBtc;
       }
     }
   }

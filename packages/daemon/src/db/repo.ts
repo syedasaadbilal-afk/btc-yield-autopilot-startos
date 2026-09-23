@@ -143,11 +143,12 @@ export class Repo {
     id: string,
     status: "closed_win" | "closed_loss" | "cancelled",
     realizedBtcPnl: number,
-    exitPrice?: number
+    exitPrice?: number,
+    closedAt?: number
   ): void {
     this.db
       .prepare("UPDATE trades SET status = ?, closed_at = ?, realized_btc_pnl = ?, exit_price = ? WHERE id = ?")
-      .run(status, Date.now(), realizedBtcPnl, exitPrice ?? null, id);
+      .run(status, closedAt ?? Date.now(), realizedBtcPnl, exitPrice ?? null, id);
   }
 
   getOpenTrade(pairKey: string = DEFAULT_PAIR_KEY): Trade | undefined {

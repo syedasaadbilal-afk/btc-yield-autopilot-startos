@@ -41,9 +41,24 @@ function formatPrice(price: number | undefined): string {
  * like "XMR entered" when XMR has never actually entered Monero. TradingView's
  * own List of Trades only ever lists closed trades for the same reason - an
  * open position has no exit price/PnL to report yet.
+ *
+ * That earlier fix wasn't enough on its own (bug found live Aug 2026, round
+ * 6): a bootstrap-inferred trade (opened with an estimated price, not a real
+ * fill - see loop.ts's reconciliation block) can go on to be legitimately
+ * CLOSED by a real flip later, which passes the closed-status filter above
+ * and renders as a genuine round trip with a real-looking PnL/return - even
+ * though the "entry" leg never actually happened as a trade. Confirmed live:
+ * XMR's first-ever real entry (BTC -> XMR) showed up paired against a
+ * bootstrap "entry" from days earlier, reporting a fabricated +6.37% return.
+ * Exclude any trade whose open was bootstrap-inferred (tagged via `notes`
+ * at insert time) from this performance table entirely, regardless of its
+ * closed status - it never represents a real trading decision.
  */
 export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: DisplayUnit }) {
-  const closed = trades.filter((t) => t.status === "closed_win" || t.status === "closed_loss");
+  const closed = trades.filter(
+    (t) =>
+      (t.status === "closed_win" || t.status === "closed_loss") && !t.notes?.includes("Bootstrap-inferred")
+  );
   if (closed.length === 0) {
     return <div className="text-sm text-slate-500 py-4">No closed trades yet.</div>;
   }
