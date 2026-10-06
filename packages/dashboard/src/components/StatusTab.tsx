@@ -88,7 +88,12 @@ export function StatusTab({
     const nav = hist.length > 0 ? hist[hist.length - 1]!.btcEquivalentNav : funded;
     fundedByPair[pair.pairKey] = funded;
     deployedByPair[pair.pairKey] = nav;
-    deployedNav += nav;
+    // Round 8 (live Oct 2026): a pair currently in BTC ("long") has its
+    // capital sitting in the BTC wallet, which realBtcHeld below already
+    // counts - adding its per-pair NAV too double-counted it (showed
+    // 0.1366 vs a real wallet total of ~0.0927 BTC). Only pairs holding
+    // their asset ("flat") contribute NAV beyond the BTC wallet.
+    if (pair.currentPosition === "flat") deployedNav += nav;
   }
   const totalNav = deployedNav + (status.realBtcHeld ?? 0);
 
