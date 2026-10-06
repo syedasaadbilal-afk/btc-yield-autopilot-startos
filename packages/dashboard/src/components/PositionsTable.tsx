@@ -1,5 +1,5 @@
 import { Fragment } from "react";
-import type { Trade } from "@autopilot/shared";
+import { deriveAssetHolds, type Trade } from "@autopilot/shared";
 import { formatBtcAmount, type DisplayUnit } from "../format.js";
 
 function formatReturn(pnl: number | undefined, capital: number): string {
@@ -55,17 +55,15 @@ function formatPrice(price: number | undefined): string {
  * closed status - it never represents a real trading decision.
  */
 export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: DisplayUnit }) {
-  const closed = trades.filter(
-    (t) =>
-      (t.status === "closed_win" || t.status === "closed_loss") && !t.notes?.includes("Bootstrap-inferred")
-  );
-  if (closed.length === 0) {
-    return <div className="text-sm text-slate-500 py-4">No closed trades yet.</div>;
+  const holds = deriveAssetHolds(trades);
+  if (holds.length === 0) {
+    return <div className="text-sm text-slate-500 py-4">No trades yet.</div>;
   }
-  const ordered = [...closed].reverse(); // most recent trade first, matches the reference
-  const wins = closed.filter((t) => t.status === "closed_win").length;
-  const totalNetPnl = closed.reduce((sum, t) => sum + (t.realizedBtcPnl ?? 0), 0);
-  const winRate = (wins / closed.length) * 100;
+  const ordered = [...holds].reverse(); // most recent first, matches the reference
+  const closed = holds.filter((h) => h.pnl !== undefined);
+  const wins = closed.filter((h) => (h.pnl ?? 0) >= 0).length;
+  const totalNetPnl = closed.reduce((sum, h) => sum + (h.pnl ?? 0), 0);
+  const winRate = closed.length > 0 ? (wins / closed.length) * 100 : 0;
 
   return (
     <div className="space-y-3">
@@ -98,8 +96,8 @@ export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: Displa
         <tbody>
           {ordered.map((t, i) => {
             const tradeNumber = ordered.length - i;
-            const pnlColor =
-              t.realizedBtcPnl === undefined ? "" : t.realizedBtcPnl >= 0 ? "text-emerald-400" : "text-red-400";
+            const pnlColor = t.pnl === undefined ? "" : t.pnl >= 0 ? "text-emerald-400" : "text-red-400";
+            const sizeCell = t.size !== undefined ? formatBtcAmount(t.size, unit) : "-";
 
             return (
               <Fragment key={t.id}>
@@ -112,24 +110,24 @@ export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: Displa
                   </td>
                   <td className="py-1.5 pr-3 whitespace-nowrap">
                     <span className="text-slate-500 mr-1">Exit</span>
-                    {t.closedAt ? new Date(t.closedAt).toLocaleDateString() : "-"}
+                    {t.exitAt !== undefined ? new Date(t.exitAt).toLocaleDateString() : "Open"}
                   </td>
                   <td className="py-1.5 pr-3">{formatPrice(t.exitPrice)}</td>
-                  <td className="py-1.5 pr-3">{formatBtcAmount(t.btcCapitalAtOpen, unit)}</td>
+                  <td className="py-1.5 pr-3">{sizeCell}</td>
                   <td rowSpan={2} className={`py-1.5 pr-3 align-top ${pnlColor}`}>
-                    {t.realizedBtcPnl !== undefined ? formatBtcAmount(t.realizedBtcPnl, unit, { signed: true }) : "-"}
+                    {t.pnl !== undefined ? formatBtcAmount(t.pnl, unit, { signed: true }) : "-"}
                   </td>
                   <td rowSpan={2} className={`py-1.5 pr-3 align-top ${pnlColor}`}>
-                    {formatReturn(t.realizedBtcPnl, t.btcCapitalAtOpen)}
+                    {formatReturn(t.pnl, t.size ?? 0)}
                   </td>
                 </tr>
                 <tr className="border-b border-slate-800">
                   <td className="py-1.5 pr-3 whitespace-nowrap">
                     <span className="text-slate-500 mr-1">Entry</span>
-                    {new Date(t.openedAt).toLocaleDateString()}
+                    {t.entryAt !== undefined ? new Date(t.entryAt).toLocaleDateString() : "-"}
                   </td>
                   <td className="py-1.5 pr-3">{formatPrice(t.entryPrice)}</td>
-                  <td className="py-1.5 pr-3">{formatBtcAmount(t.btcCapitalAtOpen, unit)}</td>
+                  <td className="py-1.5 pr-3">{sizeCell}</td>
                 </tr>
               </Fragment>
             );

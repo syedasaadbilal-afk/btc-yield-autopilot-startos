@@ -71,7 +71,7 @@ export function TimelineTab({ status, unit }: { status: StatusResponse | undefin
 
       <div className="bg-ink-900 border border-slate-800 rounded-lg p-4">
         <h3 className="text-xs font-semibold tracking-wider text-slate-300 uppercase mb-3">
-          Trades (closed entry/exit round trips only)
+          Trades (TradingView style: entry into asset, exit back to BTC)
         </h3>
         <div className="overflow-x-auto">
           <PositionsTable trades={trades} unit={unit} />

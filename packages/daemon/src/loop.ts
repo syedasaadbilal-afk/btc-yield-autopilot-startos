@@ -819,6 +819,13 @@ export async function runControlLoopIteration(deps: LoopDeps): Promise<PairLoopR
       for (const key of Object.keys(allocation) as Array<keyof typeof allocation>) {
         const targetFraction = allocation[key] ?? 0;
         if (targetFraction <= 0) continue;
+        // Round 8 (live Oct 2026): a pair whose own regime says "hold BTC"
+        // can never deploy a top-up, so it must not be eligible to win it -
+        // otherwise idle BTC gets assigned to e.g. XAUT (in BTC, huge
+        // deficit) and sits forever while XMR, which can use it, stays
+        // underweight.
+        const obsForKey = observations.find((o) => o.pair.key === key);
+        if (!obsForKey || obsForKey.today.position !== "flat") continue;
         const targetBtc = targetFraction * walletBasis.totalPortfolioBtc;
         const currentBtc = walletBasis.currentValueByPairKey[key] ?? 0;
         const deficitBtc = targetBtc - currentBtc;
@@ -828,7 +835,11 @@ export async function runControlLoopIteration(deps: LoopDeps): Promise<PairLoopR
         }
       }
       if (mostUnderweightKey) {
-        idleTopUpByPairKey[mostUnderweightKey] = idleBtc;
+        // Cap at the pair's actual deficit: deploying ALL idle BTC overshoots
+        // its target (seen live 10/2: 0.15 BTC top-up, trimmed back 10/3),
+        // paying fees twice. Remainder stays idle for the next-most-underweight
+        // pair / a pair whose regime flips to the asset.
+        idleTopUpByPairKey[mostUnderweightKey] = Math.min(idleBtc, largestDeficitBtc);
       }
     }
   }

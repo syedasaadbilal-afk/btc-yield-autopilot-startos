@@ -100,4 +100,43 @@ describe("idle top-up routing under a non-50/50, non-100/0 allocation override",
     expect(topup!.status).toBe("executed");
     expect(topup!.movedBtc).toBeGreaterThan(0);
   });
+
+  /**
+   * Round 8 (live Oct 2026): XAUT's regime said BTC while XMR was underweight.
+   * The old sweep assigned ALL idle BTC to XAUT (largest deficit, but it can't
+   * deploy while in BTC), so 0.043 BTC sat idle with XMR at 37% vs a 55%
+   * target. It also deployed the full idle amount rather than just the
+   * deficit, overshooting the target (0.15 BTC top-up trimmed back a day later).
+   */
+  it("skips a pair whose regime says BTC and caps the top-up at the receiving pair's deficit", async () => {
+    const client: BitfinexRestClient = {
+      getCandles: async (symbol: string) =>
+        symbol === XAUT_SYMBOL ? makeCandles(new Array(100).fill(100)) : makeCandles(orangeFlatCloses(102)),
+      getBookDepth: async (symbol: string) => ({ timestamp: 0, symbol, bidDepth: 50, askDepth: 50 }),
+      submitOrder: async () => ({ submitted: false, dryRun: true }),
+      getMinOrderSize: async () => 0,
+      getWallets: async () => [
+        { walletType: "exchange", currency: "BTC", balance: 100, availableBalance: 100 },
+        { walletType: "exchange", currency: "XAUT", balance: 0, availableBalance: 0 },
+        { walletType: "exchange", currency: "XMR", balance: 1, availableBalance: 1 },
+      ],
+    } as unknown as BitfinexRestClient;
+
+    repo.setAllocationOverride(true, 0.45);
+    repo.setAllocationFraction("xaut", 0.45);
+    repo.setAllocationFraction("xmr", 0.55);
+
+    const results = await runControlLoopIteration({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    const xaut = results.find((r) => r.pairKey === "xaut")!;
+    const xmr = results.find((r) => r.pairKey === "xmr")!;
+
+    expect(xaut.rotated).toBe(false);
+    expect(xmr.rotated).toBe(true);
+
+    const topup = repo.getRecentExecutions("xmr", 10).find((e) => e.kind === "topup");
+    expect(topup).toBeDefined();
+    // Deficit is ~9 BTC of 100 idle; must not deploy the whole 100.
+    expect(topup!.requestedBtc).toBeGreaterThan(0);
+    expect(topup!.requestedBtc).toBeLessThan(20);
+  });
 });
