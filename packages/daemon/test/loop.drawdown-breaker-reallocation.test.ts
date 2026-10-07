@@ -6,6 +6,13 @@ import { applyMigrations } from "../src/db/migrate.js";
 import { Repo } from "../src/db/repo.js";
 import { runControlLoopIteration } from "../src/loop.js";
 
+// These tests use synthetic prices/amounts far above any real $/day cap and test
+// allocation behavior, not the cap (see loop.deploy-cap.test.ts).
+const NO_DEPLOY_CAP_CONFIG = {
+  ...DEFAULT_STRATEGY_CONFIG,
+  execution: { ...DEFAULT_STRATEGY_CONFIG.execution, maxDeployUsdPerDay: Infinity },
+};
+
 const XAUT_SYMBOL = "tXAUT:BTC";
 const XMR_SYMBOL = "tXMRBTC";
 
@@ -86,7 +93,7 @@ describe("drawdown circuit breaker ignores nav history from before the last real
       { [XAUT_SYMBOL]: STAYS_NAVY_CLOSES, [XMR_SYMBOL]: STAYS_NAVY_CLOSES },
       FRESH_BTC_ONLY_WALLET
     );
-    await runControlLoopIteration({ client: settleClient, repo, config: DEFAULT_STRATEGY_CONFIG, now: t0 });
+    await runControlLoopIteration({ client: settleClient, repo, config: NO_DEPLOY_CAP_CONFIG, now: t0 });
 
     // Tick 1: XAUT alone goes orange -> single-gold 100% XAUT (its NAV peaks
     // high here - this is the stale peak that must NOT poison the breaker
@@ -99,7 +106,7 @@ describe("drawdown circuit breaker ignores nav history from before the last real
       { [XAUT_SYMBOL]: XAUT_ENTER_CLOSES, [XMR_SYMBOL]: STAYS_NAVY_CLOSES },
       ESTABLISHED_WALLET
     );
-    const tick1 = await runControlLoopIteration({ client: tick1Client, repo, config: DEFAULT_STRATEGY_CONFIG, now: t0 + day });
+    const tick1 = await runControlLoopIteration({ client: tick1Client, repo, config: NO_DEPLOY_CAP_CONFIG, now: t0 + day });
     expect(tick1.find((r) => r.pairKey === "xaut")!.targetFraction).toBeCloseTo(1);
 
     // Tick 2: XMR also goes orange -> collapses to 50/50 dual-gold. XAUT's
@@ -113,7 +120,7 @@ describe("drawdown circuit breaker ignores nav history from before the last real
     const tick2 = await runControlLoopIteration({
       client: tick2Client,
       repo,
-      config: DEFAULT_STRATEGY_CONFIG,
+      config: NO_DEPLOY_CAP_CONFIG,
       now: t0 + 2 * day,
     });
     const xaut2 = tick2.find((r) => r.pairKey === "xaut")!;
@@ -137,7 +144,7 @@ describe("drawdown circuit breaker ignores nav history from before the last real
     const tick3 = await runControlLoopIteration({
       client: tick3Client,
       repo,
-      config: DEFAULT_STRATEGY_CONFIG,
+      config: NO_DEPLOY_CAP_CONFIG,
       now: t0 + 30 * day,
     });
     const xaut3 = tick3.find((r) => r.pairKey === "xaut")!;

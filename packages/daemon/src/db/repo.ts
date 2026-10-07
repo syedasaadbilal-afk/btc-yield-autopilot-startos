@@ -248,6 +248,20 @@ export class Repo {
       );
   }
 
+  /**
+   * Total BTC actually moved INTO rotation assets (any pair, any kind: flip
+   * entry, resize up, idle top-up) at or after `sinceTs` - drives the daily
+   * deployment cap in loop.ts.
+   */
+  getDeployedIntoAssetBtcSince(sinceTs: number): number {
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(SUM(moved_btc), 0) AS total FROM execution_log WHERE side = 'sell_btc_for_xaut' AND status = 'executed' AND timestamp >= ?"
+      )
+      .get(sinceTs) as { total: number };
+    return row.total;
+  }
+
   /** Most recent execution attempts for this pair, newest first - powers the Timeline tab. */
   getRecentExecutions(pairKey: string = DEFAULT_PAIR_KEY, limit = 100): ExecutionLogEntry[] {
     const rows = this.db
@@ -355,6 +369,45 @@ export class Repo {
     return row
       ? { enabled: row.enabled === 1, xautFraction: row.xaut_fraction }
       : { enabled: false, xautFraction: 0.5 };
+  }
+
+  /**
+   * Daily deployment cap (USD per rolling 24h into rotation assets). With no
+   * stored row, falls back to `configDefaultUsd` (undefined = uncapped).
+   * Returns `maxUsd: undefined` when the operator has disabled the cap.
+   */
+  getDeployCap(configDefaultUsd: number | undefined): { enabled: boolean; maxUsd: number | undefined } {
+    const row = this.db.prepare("SELECT enabled, max_usd_per_day FROM deploy_cap WHERE id = 1").get() as
+      | { enabled: number; max_usd_per_day: number }
+      | undefined;
+    if (!row) {
+      const usable = configDefaultUsd !== undefined && Number.isFinite(configDefaultUsd);
+      return { enabled: usable, maxUsd: usable ? configDefaultUsd : undefined };
+    }
+    return { enabled: row.enabled === 1, maxUsd: row.enabled === 1 ? row.max_usd_per_day : undefined };
+  }
+
+  getChunkUsd(configDefaultUsd: number): number {
+    const row = this.db.prepare("SELECT chunk_usd FROM chunk_size WHERE id = 1").get() as { chunk_usd: number } | undefined;
+    return row?.chunk_usd ?? configDefaultUsd;
+  }
+
+  setChunkUsd(chunkUsd: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO chunk_size (id, chunk_usd, updated_at) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET chunk_usd = excluded.chunk_usd, updated_at = excluded.updated_at`
+      )
+      .run(chunkUsd, Date.now());
+  }
+
+  setDeployCap(enabled: boolean, maxUsd: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO deploy_cap (id, enabled, max_usd_per_day, updated_at) VALUES (1, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, max_usd_per_day = excluded.max_usd_per_day, updated_at = excluded.updated_at`
+      )
+      .run(enabled ? 1 : 0, maxUsd, Date.now());
   }
 
   setAllocationOverride(enabled: boolean, xautFraction: number): void {

@@ -95,7 +95,7 @@ export function StatusTab({
     // their asset ("flat") contribute NAV beyond the BTC wallet.
     if (pair.currentPosition === "flat") deployedNav += nav;
   }
-  const totalNav = deployedNav + (status.realBtcHeld ?? 0);
+  const totalNav = deployedNav + (status.realBtcHeld ?? 0) + (status.realUsdtBtcEquivalent ?? 0);
 
   return (
     <div className="space-y-6 p-6">
@@ -145,7 +145,11 @@ export function StatusTab({
       </div>
 
       {/* Real live wallet balances - ground truth from Bitfinex, not the internal NAV ledger */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <MetricTile
+          label="USDT held (live)"
+          value={status.realUsdtHeld !== undefined ? status.realUsdtHeld.toFixed(2) : "-"}
+        />
         <MetricTile
           label="BTC held (live)"
           value={status.realBtcHeld !== null ? status.realBtcHeld.toFixed(8) : "-"}

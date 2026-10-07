@@ -6,6 +6,13 @@ import { applyMigrations } from "../src/db/migrate.js";
 import { Repo } from "../src/db/repo.js";
 import { runControlLoopIteration } from "../src/loop.js";
 
+// These tests use synthetic prices/amounts far above any real $/day cap and test
+// allocation behavior, not the cap (see loop.deploy-cap.test.ts).
+const NO_DEPLOY_CAP_CONFIG = {
+  ...DEFAULT_STRATEGY_CONFIG,
+  execution: { ...DEFAULT_STRATEGY_CONFIG.execution, maxDeployUsdPerDay: Infinity },
+};
+
 const XAUT_SYMBOL = "tXAUT:BTC";
 const XMR_SYMBOL = "tXMRBTC";
 
@@ -77,7 +84,7 @@ describe("cross-pair rotation & allocation (asymmetric regimes, daemon-level)", 
       { [XAUT_SYMBOL]: ENTRY_CLOSES, [XMR_SYMBOL]: STAYS_NAVY_CLOSES },
       FRESH_BTC_ONLY_WALLET
     );
-    const results = await runControlLoopIteration({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    const results = await runControlLoopIteration({ client, repo, config: NO_DEPLOY_CAP_CONFIG });
 
     const xaut = results.find((r) => r.pairKey === "xaut")!;
     const xmr = results.find((r) => r.pairKey === "xmr")!;
@@ -100,7 +107,7 @@ describe("cross-pair rotation & allocation (asymmetric regimes, daemon-level)", 
       { [XAUT_SYMBOL]: STAYS_NAVY_CLOSES, [XMR_SYMBOL]: STAYS_NAVY_CLOSES },
       FRESH_BTC_ONLY_WALLET
     );
-    const results = await runControlLoopIteration({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    const results = await runControlLoopIteration({ client, repo, config: NO_DEPLOY_CAP_CONFIG });
     for (const r of results) {
       expect(r.currentPosition).toBe("long");
       expect(r.decisionTarget).toBe("long");
@@ -128,7 +135,7 @@ describe("cross-pair rotation & allocation (asymmetric regimes, daemon-level)", 
       { [XAUT_SYMBOL]: STAYS_NAVY_CLOSES, [XMR_SYMBOL]: STAYS_NAVY_CLOSES },
       FRESH_BTC_ONLY_WALLET
     );
-    await runControlLoopIteration({ client: settleClient, repo, config: DEFAULT_STRATEGY_CONFIG });
+    await runControlLoopIteration({ client: settleClient, repo, config: NO_DEPLOY_CAP_CONFIG });
 
     // Tick 1: both pairs enter orange together -> 50/50 (same shape proven in
     // loop.resize.test.ts, just appended after the settle prefix so history is continuous).
@@ -137,7 +144,7 @@ describe("cross-pair rotation & allocation (asymmetric regimes, daemon-level)", 
       { [XAUT_SYMBOL]: TICK1_ENTRY_CLOSES, [XMR_SYMBOL]: TICK1_ENTRY_CLOSES },
       ESTABLISHED_WALLET
     );
-    const tick1 = await runControlLoopIteration({ client: tick1Client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    const tick1 = await runControlLoopIteration({ client: tick1Client, repo, config: NO_DEPLOY_CAP_CONFIG });
     for (const r of tick1) {
       expect(r.targetFraction).toBeCloseTo(0.5);
       expect(r.decisionTarget).toBe("flat"); // both entering this tick
@@ -153,7 +160,7 @@ describe("cross-pair rotation & allocation (asymmetric regimes, daemon-level)", 
       { [XAUT_SYMBOL]: TICK1_ENTRY_CLOSES, [XMR_SYMBOL]: TICK2_XMR_CLOSES },
       ESTABLISHED_WALLET
     );
-    const tick2 = await runControlLoopIteration({ client: tick2Client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    const tick2 = await runControlLoopIteration({ client: tick2Client, repo, config: NO_DEPLOY_CAP_CONFIG });
 
     const xaut2 = tick2.find((r) => r.pairKey === "xaut")!;
     const xmr2 = tick2.find((r) => r.pairKey === "xmr")!;
@@ -200,7 +207,7 @@ describe("cross-pair rotation & allocation (asymmetric regimes, daemon-level)", 
       getWallets: async () => FRESH_BTC_ONLY_WALLET,
     } as unknown as BitfinexRestClient;
 
-    const results = await runControlLoopIteration({ client: brokenClient, repo, config: DEFAULT_STRATEGY_CONFIG });
+    const results = await runControlLoopIteration({ client: brokenClient, repo, config: NO_DEPLOY_CAP_CONFIG });
 
     const xaut = results.find((r) => r.pairKey === "xaut")!;
     const xmr = results.find((r) => r.pairKey === "xmr")!;

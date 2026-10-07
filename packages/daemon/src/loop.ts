@@ -261,6 +261,7 @@ export interface WalletBasis {
    * testing the Aug 2026 round-4 deposit-recognition fix).
    */
   assetBalanceByPairKey: Record<string, number>;
+  /** Idle deployable capital in BTC terms: BTC wallet + USDT wallet converted at BTC/USDT. */
   btcBalance: number;
   source: "wallet" | "internal_nav_fallback";
 }
@@ -273,7 +274,18 @@ async function computeWalletBasis(
 ): Promise<WalletBasis> {
   try {
     const wallets = await client.getWallets();
-    const btcBalance = wallets.find((w) => w.currency === "BTC")?.balance ?? 0;
+    const btcWalletBalance = wallets.find((w) => w.currency === "BTC")?.balance ?? 0;
+    // Idle USDT counts as deployable capital (entries spend it first).
+    const usdtBalance = wallets
+      .filter((w) => w.currency === "UST" || w.currency === "USDT")
+      .reduce((s, w) => s + w.balance, 0);
+    let usdtBtc = 0;
+    if (usdtBalance > 0 && observations[0]) {
+      const c = await client.getCandles(observations[0].pair.btcUsdtSymbol, "1D", 1);
+      const btcUsd = c[0]?.close ?? 0;
+      if (btcUsd > 0) usdtBtc = usdtBalance / btcUsd;
+    }
+    const btcBalance = btcWalletBalance + usdtBtc;
     const currentValueByPairKey: Record<string, number> = {};
     const assetBalanceByPairKey: Record<string, number> = {};
     let assetsTotalBtc = 0;
@@ -323,6 +335,46 @@ async function computeWalletBasis(
  *       money) into this pair if it's the one that should receive it.
  *   3. Neither - just mark-to-market and persist a NAV point.
  */
+/**
+ * Daily deployment cap (explicit user request, Oct 2026, ahead of a ~$70k
+ * USDT-funded deposit): limits capital deployed INTO rotation assets (flip
+ * entries, allocation increases, idle top-ups; all pairs combined) to
+ * config.execution.maxDeployUsdPerDay over a rolling 24h, so a large deposit
+ * is drip-fed instead of hitting a thin order book at once. Returns
+ * `requestedBtc` clipped to what's left under the cap. Exits are never passed
+ * through this. Fails closed (returns 0) if the BTC/USD price can't be read.
+ */
+async function applyDeployCap(
+  deps: LoopDeps,
+  pair: PairConfig,
+  requestedBtc: number,
+  now: number,
+  opts: { dryCheck?: boolean } = {}
+): Promise<number> {
+  // Operator-set value (Config tab, persisted in deploy_cap) wins; with none
+  // stored, config.execution.maxDeployUsdPerDay is the default.
+  const capUsd = deps.repo.getDeployCap(deps.config.execution.maxDeployUsdPerDay).maxUsd;
+  if (capUsd === undefined || !Number.isFinite(capUsd)) return requestedBtc;
+  let btcUsd = 0;
+  try {
+    btcUsd = (await deps.client.getCandles(pair.btcUsdtSymbol, "1D", 1))[0]?.close ?? 0;
+  } catch {
+    btcUsd = 0;
+  }
+  if (!(btcUsd > 0)) {
+    if (!opts.dryCheck) console.warn(`[${pair.key}] daily deployment cap: BTC/USD price unavailable - deferring deployment.`);
+    return 0;
+  }
+  const deployed = deps.repo.getDeployedIntoAssetBtcSince(now - 24 * 60 * 60 * 1000);
+  const remaining = Math.max(0, capUsd / btcUsd - deployed);
+  if (requestedBtc > remaining && !opts.dryCheck) {
+    console.log(
+      `[${pair.key}] daily deployment cap: limiting ${requestedBtc.toFixed(8)} BTC to ${remaining.toFixed(8)} BTC ($${capUsd}/day cap, ${deployed.toFixed(8)} BTC already deployed in the last 24h).`
+    );
+  }
+  return Math.min(requestedBtc, remaining);
+}
+
 async function gateAndExecute(
   deps: LoopDeps,
   obs: PairObservation,
@@ -332,7 +384,9 @@ async function gateAndExecute(
   isDualGoldState: boolean,
   idleTopUpBtc: number,
   /** RAW asset-unit balance from the live wallet this tick, when this pair is currently flat and the wallet read succeeded - undefined otherwise. See WalletBasis.assetBalanceByPairKey. */
-  liveAssetBalance: number | undefined
+  liveAssetBalance: number | undefined,
+  /** Exit only: another pair that should receive (part of) the proceeds directly instead of BTC. See computeExitDestinations. */
+  exitDestination?: { pair: PairConfig; btcAmount: number; mode: "buy" | "hold" }
 ): Promise<PairLoopResult> {
   const { client, repo, config } = deps;
   const now = deps.now ?? Date.now();
@@ -381,16 +435,55 @@ async function gateAndExecute(
 
   if (gateResult.allow && decision.target !== currentPosition) {
     const targetBtc = totalPortfolioBtc * targetFraction;
-    const btcCapital = decision.target === "long" ? (currentRealValueBtc || targetBtc) : targetBtc;
+    let btcCapital = decision.target === "long" ? (currentRealValueBtc || targetBtc) : targetBtc;
     const side = decision.target === "long" ? "buy_btc_with_xaut" : "sell_btc_for_xaut";
 
-    const executeResult = await executeRotation({ client, side, btcCapital, pair, config });
+    // Daily deployment cap applies only to entering the asset (never to exits).
+    // A capped entry still flips the position; the remainder stays idle BTC and
+    // is drip-fed by the idle top-up path on later ticks, under the same cap.
+    let flipDeferred = false;
+    if (decision.target === "flat") {
+      btcCapital = await applyDeployCap(deps, pair, btcCapital, now);
+      if (btcCapital <= totalPortfolioBtc * 0.001) flipDeferred = true;
+    }
+
+    const executeResult = flipDeferred
+      ? { plans: [], totalBtcMoved: 0, routeDecisions: [] }
+      : await executeRotation({
+          client,
+          side,
+          btcCapital,
+          pair,
+          config,
+          chunkUsd: repo.getChunkUsd(config.execution.chunkUsd ?? 10_000),
+          ...(decision.target === "long" && exitDestination && exitDestination.btcAmount > 0
+            ? { destination: { ...exitDestination } }
+            : {}),
+        });
+    if (decision.target === "long" && exitDestination && (executeResult.destinationRoutedBtc ?? 0) > 0) {
+      console.log(
+        `[${pair.key}] exit proceeds routed ${executeResult.destinationRoutedBtc!.toFixed(8)} BTC-equiv directly toward ${exitDestination.pair.assetCurrency} (${exitDestination.mode === "buy" ? "bought via USDT" : "USDT held for its entry"}).`
+      );
+      if (exitDestination.mode === "buy") {
+        repo.insertExecutionLog({
+          id: `${exitDestination.pair.key}-${now}-topup-direct`,
+          pairKey: exitDestination.pair.key,
+          timestamp: now,
+          kind: "topup",
+          side: "sell_btc_for_xaut",
+          requestedBtc: exitDestination.btcAmount,
+          movedBtc: executeResult.destinationRoutedBtc!,
+          status: "executed",
+          routes: "usdt",
+        });
+      }
+    }
     for (const rd of executeResult.routeDecisions) {
       console.log(
-        `[${pair.key}] tranche ${rd.trancheIndex} routed via "${rd.route}" (direct ${rd.directSlippageBtc.toFixed(6)} BTC vs usdt ${rd.usdtSlippageBtc.toFixed(6)} BTC estimated slippage)`
+        `[${pair.key}] tranche ${rd.trancheIndex} routed via "${rd.route}" (USDT mandated)`
       );
     }
-    repo.insertExecutionLog({
+    if (!flipDeferred) repo.insertExecutionLog({
       id: `${pair.key}-${now}-flip`,
       pairKey: pair.key,
       timestamp: now,
@@ -421,7 +514,9 @@ async function gateAndExecute(
     // capital moved; otherwise leave everything as-is so the position/trade
     // state stays consistent with reality and this tick's decision is
     // naturally retried next tick.
-    if (executeResult.totalBtcMoved <= 0) {
+    if (flipDeferred) {
+      console.log(`[${pair.key}] flip to "${decision.target}" deferred: daily deployment cap exhausted; will retry next tick.`);
+    } else if (executeResult.totalBtcMoved <= 0) {
       console.warn(
         `[${pair.key}] flip to "${decision.target}" could not execute - every tranche was below Bitfinex's minimum order size or unroutable. NOT recording a trade/allocation change; will retry next tick.`
       );
@@ -510,13 +605,26 @@ async function gateAndExecute(
           console.log(
             `[${pair.key}] resize to ${(targetFraction * 100).toFixed(0)}% blocked: run mode is PAUSED (an allocation increase is gated the same as a fresh entry).`
           );
+        } else if (
+          increasing &&
+          (await applyDeployCap(deps, pair, Math.abs(delta), now, { dryCheck: true })) <= dustThresholdBtc
+        ) {
+          // Daily deployment cap exhausted: leave the fraction un-applied so
+          // the next tick retries the remaining resize.
+          resizeBlocked = true;
+          console.log(`[${pair.key}] resize deferred: daily deployment cap exhausted; will retry next tick.`);
         } else {
           const side = increasing ? "sell_btc_for_xaut" : "buy_btc_with_xaut";
-          const resizeBtcCapital = Math.abs(delta);
+          let resizeBtcCapital = Math.abs(delta);
+          if (increasing) {
+            const cappedResize = await applyDeployCap(deps, pair, resizeBtcCapital, now);
+            if (cappedResize < resizeBtcCapital) resizeBlocked = true; // partial: retry the rest next tick
+            resizeBtcCapital = cappedResize;
+          }
           console.log(
             `[${pair.key}] resizing allocation ${lastAppliedFraction !== undefined ? (lastAppliedFraction * 100).toFixed(0) + "%" : "unset"} -> ${(targetFraction * 100).toFixed(0)}% (${resizeBtcCapital.toFixed(8)} BTC, side ${side}, dual-gold target: ${isDualGoldState})`
           );
-          const executeResult = await executeRotation({ client, side, btcCapital: resizeBtcCapital, pair, config });
+          const executeResult = await executeRotation({ client, side, btcCapital: resizeBtcCapital, pair, config, chunkUsd: repo.getChunkUsd(config.execution.chunkUsd ?? 10_000) });
           for (const rd of executeResult.routeDecisions) {
             console.log(
               `[${pair.key}] resize tranche ${rd.trancheIndex} routed via "${rd.route}" (direct ${rd.directSlippageBtc.toFixed(6)} BTC vs usdt ${rd.usdtSlippageBtc.toFixed(6)} BTC estimated slippage)`
@@ -559,16 +667,20 @@ async function gateAndExecute(
         console.log(
           `[${pair.key}] skipping idle-capital top-up of ${idleTopUpBtc.toFixed(8)} BTC: run mode is PAUSED (treated the same as a fresh entry).`
         );
+      } else if ((await applyDeployCap(deps, pair, idleTopUpBtc, now, { dryCheck: true })) <= totalPortfolioBtc * 0.001) {
+        console.log(`[${pair.key}] idle top-up deferred: daily deployment cap exhausted.`);
       } else {
+        const topUpBtc = await applyDeployCap(deps, pair, idleTopUpBtc, now);
         console.log(
-          `[${pair.key}] deploying idle/top-up capital: ${idleTopUpBtc.toFixed(8)} BTC into ${pair.assetCurrency}.`
+          `[${pair.key}] deploying idle/top-up capital: ${topUpBtc.toFixed(8)} BTC into ${pair.assetCurrency}.`
         );
         const executeResult = await executeRotation({
           client,
           side: "sell_btc_for_xaut",
-          btcCapital: idleTopUpBtc,
+          btcCapital: topUpBtc,
           pair,
           config,
+          chunkUsd: repo.getChunkUsd(config.execution.chunkUsd ?? 10_000),
         });
         for (const rd of executeResult.routeDecisions) {
           console.log(
@@ -581,13 +693,13 @@ async function gateAndExecute(
           timestamp: now,
           kind: "topup",
           side: "sell_btc_for_xaut",
-          requestedBtc: idleTopUpBtc,
+          requestedBtc: topUpBtc,
           movedBtc: executeResult.totalBtcMoved,
           status: executeResult.totalBtcMoved > 0 ? "executed" : "blocked",
           routes: executeResult.routeDecisions.map((rd) => rd.route).join(","),
         });
         rotated = true;
-        executedBtcCapital = idleTopUpBtc;
+        executedBtcCapital = topUpBtc;
         executedDirection = "into_asset";
       }
     }
@@ -834,12 +946,47 @@ export async function runControlLoopIteration(deps: LoopDeps): Promise<PairLoopR
           mostUnderweightKey = key;
         }
       }
-      if (mostUnderweightKey) {
+      // Skip when the capped amount is dust: below the exchange minimum it
+      // can only produce a "blocked" execution row (seen live 10/6: two
+      // 0.000001 BTC top-ups logged as blocked right after a resize).
+      if (mostUnderweightKey && Math.min(idleBtc, largestDeficitBtc) > dustThresholdBtc) {
         // Cap at the pair's actual deficit: deploying ALL idle BTC overshoots
         // its target (seen live 10/2: 0.15 BTC top-up, trimmed back 10/3),
         // paying fees twice. Remainder stays idle for the next-most-underweight
         // pair / a pair whose regime flips to the asset.
         idleTopUpByPairKey[mostUnderweightKey] = Math.min(idleBtc, largestDeficitBtc);
+      }
+    }
+  }
+
+  // Exit destinations: when a pair is leaving its asset this tick, proceeds can
+  // go straight (via USDT) into another pair's asset that wants capital, rather
+  // than detouring through BTC. Another pair already holding its asset and
+  // underweight -> buy it directly ("buy"); another pair entering its asset this
+  // tick -> leave the USDT idle for its entry, which spends idle USDT first
+  // ("hold"). Sized to that pair's deficit; the rest of the proceeds go to BTC.
+  const exitDestinationByPairKey: Record<string, { pair: PairConfig; btcAmount: number; mode: "buy" | "hold" }> = {};
+  if (allocation !== undefined && walletBasis.source === "wallet") {
+    const dust = walletBasis.totalPortfolioBtc * 0.001;
+    for (const exiting of observations) {
+      if (exiting.currentPosition !== "flat" || exiting.today.position !== "long") continue;
+      const exitBtc = walletBasis.currentValueByPairKey[exiting.pair.key] ?? 0;
+      let best: { pair: PairConfig; deficit: number; mode: "buy" | "hold" } | undefined;
+      for (const other of observations) {
+        if (other.pair.key === exiting.pair.key || other.today.position !== "flat") continue;
+        const target = ((allocation as Record<string, number>)[other.pair.key] ?? 0) * walletBasis.totalPortfolioBtc;
+        if (target <= 0) continue;
+        const mode = other.currentPosition === "flat" ? "buy" : "hold";
+        const current = mode === "buy" ? (walletBasis.currentValueByPairKey[other.pair.key] ?? 0) : 0;
+        const deficit = target - current - (idleTopUpByPairKey[other.pair.key] ?? 0);
+        if (deficit > dust && (!best || deficit > best.deficit)) best = { pair: other.pair, deficit, mode };
+      }
+      if (best) {
+        exitDestinationByPairKey[exiting.pair.key] = {
+          pair: best.pair,
+          btcAmount: Math.min(exitBtc, best.deficit),
+          mode: best.mode,
+        };
       }
     }
   }
@@ -861,7 +1008,8 @@ export async function runControlLoopIteration(deps: LoopDeps): Promise<PairLoopR
           walletBasis.currentValueByPairKey[obs.pair.key] ?? 0,
           isDualGoldState,
           idleTopUpByPairKey[obs.pair.key] ?? 0,
-          walletBasis.source === "wallet" ? (walletBasis.assetBalanceByPairKey[obs.pair.key] ?? undefined) : undefined
+          walletBasis.source === "wallet" ? (walletBasis.assetBalanceByPairKey[obs.pair.key] ?? undefined) : undefined,
+          exitDestinationByPairKey[obs.pair.key]
         )
       );
     } catch (err) {

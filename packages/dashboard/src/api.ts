@@ -41,6 +41,10 @@ export interface StatusResponse {
   startingBtc: number;
   /** Real live Bitfinex BTC exchange-wallet balance (portfolio-wide, BTC is fungible across pairs). Null if secrets unset or fetch failed. */
   realBtcHeld: number | null;
+  /** Idle USDT wallet balance (counts as deployable capital). */
+  realUsdtHeld?: number;
+  /** That USDT converted to BTC at the live BTC/USDT price. */
+  realUsdtBtcEquivalent?: number;
   pairs: PairStatus[];
 }
 
@@ -131,6 +135,46 @@ export async function saveAllocationOverride(enabled: boolean, xautFraction: num
     return (await res.json()) as AllocationOverride;
   } catch {
     return undefined;
+  }
+}
+
+export interface DeployCap {
+  enabled: boolean;
+  maxUsd: number | undefined;
+}
+
+export async function fetchDeployCap(): Promise<DeployCap> {
+  return (await getJson<DeployCap>("/api/deploy-cap")) ?? { enabled: false, maxUsd: undefined };
+}
+
+export async function saveDeployCap(enabled: boolean, maxUsd: number): Promise<DeployCap | undefined> {
+  try {
+    const res = await fetch("/api/deploy-cap", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled, maxUsd }),
+    });
+    if (!res.ok) return undefined;
+    return (await res.json()) as DeployCap;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function fetchChunkUsd(): Promise<number> {
+  return (await getJson<{ chunkUsd: number }>("/api/chunk-size"))?.chunkUsd ?? 10000;
+}
+
+export async function saveChunkUsd(chunkUsd: number): Promise<boolean> {
+  try {
+    const res = await fetch("/api/chunk-size", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chunkUsd }),
+    });
+    return res.ok;
+  } catch {
+    return false;
   }
 }
 

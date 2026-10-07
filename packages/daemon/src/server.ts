@@ -54,6 +54,18 @@ export async function createServer(opts: CreateServerOptions) {
       const wallets = await client.getWallets();
       const balances: Record<string, number> = {};
       for (const w of wallets) balances[w.currency.toUpperCase()] = w.balance;
+      // Idle USDT counts toward NAV (converted to BTC at the live BTC/USDT price).
+      const usdt = (balances["UST"] ?? 0) + (balances["USDT"] ?? 0);
+      if (usdt > 0) {
+        balances["UST"] = usdt;
+        try {
+          const c = await client.getCandles("tBTCUST", "1D", 1);
+          const px = c[0]?.close ?? 0;
+          if (px > 0) balances["__USDT_BTC"] = usdt / px;
+        } catch {
+          // price unavailable - NAV just omits USDT this poll
+        }
+      }
       walletCache = { at: Date.now(), balances };
       return balances;
     } catch (err) {
@@ -162,6 +174,8 @@ export async function createServer(opts: CreateServerOptions) {
       nextTickAt: opts.state.lastTickAt ? opts.state.lastTickAt + opts.state.tickMs : null,
       startingBtc: DEFAULT_STRATEGY_CONFIG.capital.startingBtc,
       realBtcHeld: liveBalances["BTC"] ?? null,
+      realUsdtHeld: liveBalances["UST"] ?? 0,
+      realUsdtBtcEquivalent: liveBalances["__USDT_BTC"] ?? 0,
       pairs,
     };
   });
@@ -294,6 +308,41 @@ export async function createServer(opts: CreateServerOptions) {
       `[autopilot] allocation override changed via dashboard -> enabled=${enabled}, xaut=${(xautFraction * 100).toFixed(0)}%`
     );
     return { enabled, xautFraction };
+  });
+
+  // Daily deployment cap (USD/rolling 24h into rotation assets). Operator-
+  // editable from the Config tab; see loop.ts applyDeployCap.
+  fastify.get("/api/deploy-cap", async () =>
+    opts.repo.getDeployCap(DEFAULT_STRATEGY_CONFIG.execution.maxDeployUsdPerDay)
+  );
+
+  fastify.put("/api/deploy-cap", async (req, reply) => {
+    const body = req.body as { enabled?: boolean; maxUsd?: number } | undefined;
+    const enabled = body?.enabled;
+    const maxUsd = body?.maxUsd;
+    if (typeof enabled !== "boolean" || typeof maxUsd !== "number" || !Number.isFinite(maxUsd) || maxUsd <= 0) {
+      reply.code(400);
+      return { error: "enabled must be boolean, maxUsd must be a positive number" };
+    }
+    opts.repo.setDeployCap(enabled, maxUsd);
+    console.log(`[autopilot] daily deployment cap changed via dashboard -> enabled=${enabled}, maxUsd=${maxUsd}`);
+    return { enabled, maxUsd: enabled ? maxUsd : undefined };
+  });
+
+  // Phased-order chunk size (USD per limit order, one open at a time).
+  fastify.get("/api/chunk-size", async () => ({
+    chunkUsd: opts.repo.getChunkUsd(DEFAULT_STRATEGY_CONFIG.execution.chunkUsd ?? 10_000),
+  }));
+
+  fastify.put("/api/chunk-size", async (req, reply) => {
+    const chunkUsd = (req.body as { chunkUsd?: number } | undefined)?.chunkUsd;
+    if (typeof chunkUsd !== "number" || !Number.isFinite(chunkUsd) || chunkUsd < 100) {
+      reply.code(400);
+      return { error: "chunkUsd must be a number >= 100" };
+    }
+    opts.repo.setChunkUsd(chunkUsd);
+    console.log(`[autopilot] order chunk size changed via dashboard -> $${chunkUsd}`);
+    return { chunkUsd };
   });
 
   // "Run decision now" - matches the button pattern from Hashrate Autopilot's

@@ -143,6 +143,16 @@ export interface StrategyConfig {
     layeringWindowMs: number;
     maxFractionOfBookDepthPerClip: number;
     maxSlippageBtcFractionOfTrade: number;
+    /**
+     * Rolling-24h cap (USD) on capital deployed INTO a rotation asset
+     * (flip entries, allocation increases, idle top-ups, summed across all
+     * pairs). Large deposits are drip-fed at this rate instead of hitting a
+     * thin order book at once. Exits back to BTC are never capped. Omit/Infinity
+     * to disable.
+     */
+    maxDeployUsdPerDay?: number;
+    /** USD size of each phased limit order (one open at a time) when rotating through USDT pairs. Default 10,000; operator-editable in Config tab. */
+    chunkUsd?: number;
     legFallback: {
       enabled: boolean;
       btcUsdSymbol: string; // "tBTCUSD"
@@ -240,6 +250,7 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
     layeringWindowMs: 30 * 60 * 1000,
     maxFractionOfBookDepthPerClip: 0.15,
     maxSlippageBtcFractionOfTrade: 0.003,
+    chunkUsd: 10_000,
     legFallback: {
       enabled: true,
       btcUsdSymbol: "tBTCUSD",

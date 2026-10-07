@@ -32,7 +32,7 @@ function fakeClient(): BitfinexRestClient {
   return {
     getCandles: async (symbol: string) => {
       const close =
-        symbol === XAUT_PAIR.ratioSymbol ? DIRECT_PRICE : symbol === XAUT_PAIR.btcUsdtSymbol ? 100000 : 2800; // btc/usdt, xaut/usdt (irrelevant here since direct route should win)
+        symbol === XAUT_PAIR.ratioSymbol ? DIRECT_PRICE : symbol === XAUT_PAIR.btcUsdtSymbol ? 100000 : DIRECT_PRICE * 100000; // btc/usdt, xaut/usdt (consistent with the direct price; USDT routing is mandated)
       return [{ timestamp: 0, open: close, close, high: close, low: close, volume: 100 }];
     },
     getBookDepth: async () => ({ timestamp: 0, symbol: XAUT_PAIR.ratioSymbol, bidDepth: 5, askDepth: 5 }),

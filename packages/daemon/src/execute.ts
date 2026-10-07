@@ -1,79 +1,23 @@
 import type { PairConfig, StrategyConfig, TrancheExecutionPlan } from "@autopilot/shared";
-import { computeTrancheBtcAmounts } from "@autopilot/strategy";
-import {
-  capClipCountToMinOrderSize,
-  compareExecutionRoutes,
-  planTrancheExecution,
-  sizeClipAgainstDepth,
-} from "@autopilot/execution";
 import type { BitfinexRestClient } from "@autopilot/bitfinex-client";
 
 /**
- * Marketable limit price (design doc: "prefer limit"), derived from the last
- * daily close already fetched for routing/comparison purposes - not a true
- * best-bid/ask (bitfinex-client's getBookDepth only returns aggregated depth,
- * not price levels), but close enough on a liquid pair over a short window,
- * and crucially a real positive price rather than the "0" placeholder this
- * replaces (which Bitfinex rejects outright: error 10001 "price: invalid").
- * Buffered 0.5% in the fill direction so it's marketable against normal
- * intra-day movement without chasing an unbounded market order.
+ * Marketable limit price, derived from the last daily close - buffered 0.5%
+ * in the fill direction so it's marketable against normal intra-day movement
+ * without chasing an unbounded market order.
  */
 function marketableLimitPrice(referencePrice: number, side: "buy" | "sell", bufferFraction = 0.005): string {
   const adjusted = side === "buy" ? referencePrice * (1 + bufferFraction) : referencePrice * (1 - bufferFraction);
-  // Bitfinex prices >= 1 conventionally use 2 decimal places (e.g. BTCUST); smaller quote prices (e.g. the direct
-  // XAUT:BTC/XMRBTC pairs, priced well under 1) need more precision to avoid rounding the price to 0.
   return adjusted >= 1 ? adjusted.toFixed(2) : adjusted.toFixed(8);
 }
 
-/**
- * Clamps a requested BTC-denominated rotation size to what's actually
- * spendable right now, per side:
- *   - "sell_btc_for_xaut" (BTC -> asset): spending BTC directly, so cap
- *     against the BTC wallet's available balance.
- *   - "buy_btc_with_xaut" (asset -> BTC): spending the rotation asset, so
- *     cap against the asset wallet's available balance converted to BTC via
- *     the current direct-pair price (pair.ratioSymbol, btc-per-asset).
- * Leaves a 1% buffer below the raw available balance so this doesn't itself
- * trigger a rejection from rounding/fee-reserve differences between what
- * Bitfinex reports as "available" and what it'll actually let a limit order
- * use. Never throws - if the wallet/price read fails, falls back to the
- * originally requested amount (logged) rather than blocking the tick, since
- * a failed safety check shouldn't be worse than no safety check.
- */
-async function capBtcCapitalToAvailableBalance(params: {
-  client: BitfinexRestClient;
-  pair: PairConfig;
-  side: "buy_btc_with_xaut" | "sell_btc_for_xaut";
-  requestedBtcCapital: number;
-}): Promise<number> {
-  const { client, pair, side, requestedBtcCapital } = params;
-  const BUFFER_FRACTION = 0.01;
-  try {
-    const wallets = await client.getWallets();
+/** Bitfinex's wallet ticker for Tether is "UST" (older docs/tests may say "USDT"). */
+export const USDT_WALLET_CURRENCIES = ["UST", "USDT"] as const;
 
-    let availableBtc: number;
-    if (side === "sell_btc_for_xaut") {
-      availableBtc = wallets.find((w) => w.currency === "BTC")?.availableBalance ?? 0;
-    } else {
-      const availableAsset = wallets.find((w) => w.currency === pair.assetCurrency)?.availableBalance ?? 0;
-      const directCandle = await client.getCandles(pair.ratioSymbol, "1D", 1);
-      const btcPerAsset = directCandle[0]?.close ?? 0; // pair.ratioSymbol is btc-per-asset for both current pairs
-      availableBtc = availableAsset * btcPerAsset;
-    }
-
-    const cappedBtcCapital = Math.min(requestedBtcCapital, availableBtc * (1 - BUFFER_FRACTION));
-    if (cappedBtcCapital < requestedBtcCapital) {
-      console.warn(
-        `[${pair.key}] rotation size capped: requested ${requestedBtcCapital.toFixed(8)} BTC, only ${availableBtc.toFixed(8)} BTC-equivalent available (side ${side}) - using ${cappedBtcCapital.toFixed(8)} BTC.`
-      );
-    }
-    return Math.max(0, cappedBtcCapital);
-  } catch (err) {
-    console.warn(
-      `[${pair.key}] balance cap check failed, proceeding with requested ${requestedBtcCapital.toFixed(8)} BTC uncapped: ${err instanceof Error ? err.message : String(err)}`
-    );
-    return requestedBtcCapital;
-  }
+export function usdtAvailable(wallets: { currency: string; availableBalance: number }[]): number {
+  return wallets
+    .filter((w) => (USDT_WALLET_CURRENCIES as readonly string[]).includes(w.currency))
+    .reduce((sum, w) => sum + (w.availableBalance ?? 0), 0);
 }
 
 export interface RouteDecision {
@@ -86,29 +30,31 @@ export interface RouteDecision {
 export interface ExecuteRotationResult {
   plans: TrancheExecutionPlan[];
   totalBtcMoved: number;
-  /** Which route each tranche actually used, and why (design doc Section 8 + per-trade slippage comparison). */
+  /** Always "usdt" now (routing is mandated through USDT pairs). */
   routeDecisions: RouteDecision[];
+  /** Exit only: BTC-equivalent of proceeds routed toward the destination asset (bought, or left as USDT for its entry). */
+  destinationRoutedBtc?: number;
 }
 
+const BUFFER_FRACTION = 0.01;
+const BUFFER_LIMIT = 0.005;
+
+export const DEFAULT_CHUNK_USD = 10_000;
+
 /**
- * Executes a flat<->long rotation for one pair using the layered/tranche
- * approach from the design doc (Section 4: 25/25/50 tranches; Section 8:
- * sliced clips sized against live book depth).
+ * Executes a flat<->long rotation for one pair, ALWAYS through USDT pairs and
+ * phased in USD chunks (default $10,000, operator-editable): exactly ONE limit
+ * order is open at any time; the next chunk is only placed once the previous
+ * one has filled (an order that doesn't fill within `fillTimeoutMs` is
+ * cancelled, its partial fill kept, and the rest is retried on a later tick).
  *
- * Per tranche, this measures estimated slippage on both possible routes -
- * trading pair.ratioSymbol directly (one leg, possibly thin), versus routing
- * through BTC/USDT then asset/USDT or the reverse (two legs, each
- * individually more liquid, and free since Bitfinex charges zero trading
- * fees) - and executes via whichever is actually cheaper for that tranche's
- * size, rather than assuming one route is always better. See
- * @autopilot/execution's compareExecutionRoutes for the estimation itself.
+ *   ENTER asset: per chunk, spend idle USDT first (asset/USDT buy); only a
+ *     shortfall is raised by one BTC/USDT sell order.
+ *   EXIT asset:  per chunk, sell asset for USDT, then buy BTC with exactly
+ *     the proceeds (lower-bounded by the sell limit price).
  *
- * v1 note: this places all clips for a tranche back-to-back rather than truly
- * spreading them across `layeringWindowMs` with a scheduler - the daemon's
- * tick interval (hours) is coarser than the layering window (minutes). A
- * persistent clip queue processed on a faster sub-tick is the natural next
- * step once this is running in PAPER; tracked as a follow-up, not blocking
- * the initial build.
+ * Dry-run orders count as instantly filled. Unspent USDT stays in the wallet
+ * and is treated as idle capital on the next tick.
  */
 export async function executeRotation(params: {
   client: BitfinexRestClient;
@@ -116,189 +62,204 @@ export async function executeRotation(params: {
   btcCapital: number;
   pair: PairConfig;
   config: StrategyConfig;
+  /** USD size of each phased limit order. Defaults to config.execution.chunkUsd, then $10,000. */
+  chunkUsd?: number;
+  /** How long one chunk order may rest before it is cancelled. Default 15 min. */
+  fillTimeoutMs?: number;
+  pollIntervalMs?: number;
+  /**
+   * Exit only: send up to `btcAmount` (BTC-equivalent) of the proceeds toward
+   * another pair's asset instead of BTC. mode "buy": buy that asset directly
+   * with the USDT (destination already holds its asset). mode "hold": leave the
+   * USDT idle for the destination pair's own entry later this tick (entries
+   * spend idle USDT first). Anything beyond btcAmount goes to BTC.
+   */
+  destination?: { pair: PairConfig; btcAmount: number; mode: "buy" | "hold" };
 }): Promise<ExecuteRotationResult> {
-  const { client, side, pair, config } = params;
-  const enteringAsset = side === "sell_btc_for_xaut"; // BTC -> asset
+  const { client, side, pair, config, destination } = params;
+  const enteringAsset = side === "sell_btc_for_xaut";
+  const chunkUsd = params.chunkUsd ?? config.execution.chunkUsd ?? DEFAULT_CHUNK_USD;
+  const fillTimeoutMs = params.fillTimeoutMs ?? 15 * 60_000;
+  const pollIntervalMs = params.pollIntervalMs ?? 5_000;
+  const sleep = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
+  const routeDecisions: RouteDecision[] = [{ trancheIndex: 0, route: "usdt", directSlippageBtc: 0, usdtSlippageBtc: 0 }];
 
-  // Cap against what's actually sitting in the wallet before sizing tranches.
-  // btcCapital normally comes from the NAV curve (repo.getLatestNavPoint),
-  // which can drift from the real account balance - a manual withdrawal, a
-  // fill that came in smaller than planned, dust left over from a prior
-  // rotation, etc. Submitting tranches sized off a stale/optimistic NAV
-  // risks a rejected order (insufficient balance) mid-rotation, or worse,
-  // one leg of a USDT-route pair filling while the other gets rejected.
-  // This is a read-only wallet call (getWallets works in every run mode,
-  // see restClient.ts), so the cap applies in DRY_RUN/PAPER too - useful for
-  // catching a NAV/wallet mismatch before it ever matters in LIVE.
-  const btcCapital = await capBtcCapitalToAvailableBalance({
-    client,
-    pair,
-    side,
-    requestedBtcCapital: params.btcCapital,
-  });
+  const [btcUsdtCandle, assetUsdtCandle] = await Promise.all([
+    client.getCandles(pair.btcUsdtSymbol, "1D", 1),
+    client.getCandles(pair.assetUsdtSymbol, "1D", 1),
+  ]);
+  const btcUsdtPrice = btcUsdtCandle[0]?.close ?? 0;
+  const assetUsdtPrice = assetUsdtCandle[0]?.close ?? 0;
+  if (btcUsdtPrice <= 0 || assetUsdtPrice <= 0 || !(chunkUsd > 0)) {
+    console.warn(`[${pair.key}] rotation skipped: USDT prices unavailable or bad chunk size (BTC/USDT ${btcUsdtPrice}, asset/USDT ${assetUsdtPrice}, chunk ${chunkUsd}).`);
+    return { plans: [], totalBtcMoved: 0, routeDecisions };
+  }
 
-  const [directMinOrderSize, btcUsdtMinOrderSize, assetUsdtMinOrderSize] = await Promise.all([
-    client.getMinOrderSize(pair.ratioSymbol),
+  // Cap to what is really spendable now, BTC-equivalent.
+  let btcCapital = params.btcCapital;
+  let usdtPool = 0; // idle USDT we may spend (entries)
+  try {
+    const wallets = await client.getWallets();
+    const btcAvail = wallets.find((w) => w.currency === "BTC")?.availableBalance ?? 0;
+    const ustAvail = usdtAvailable(wallets);
+    usdtPool = enteringAsset ? ustAvail * (1 - BUFFER_FRACTION) : 0;
+    const availableBtc = enteringAsset
+      ? btcAvail + ustAvail / btcUsdtPrice
+      : ((wallets.find((w) => w.currency === pair.assetCurrency)?.availableBalance ?? 0) * assetUsdtPrice) / btcUsdtPrice;
+    const capped = Math.min(btcCapital, availableBtc * (1 - BUFFER_FRACTION));
+    if (capped < btcCapital) {
+      console.warn(
+        `[${pair.key}] rotation size capped: requested ${btcCapital.toFixed(8)} BTC, only ${availableBtc.toFixed(8)} BTC-equivalent available (side ${side}) - using ${Math.max(0, capped).toFixed(8)} BTC.`
+      );
+    }
+    btcCapital = Math.max(0, capped);
+  } catch (err) {
+    console.warn(
+      `[${pair.key}] balance cap check failed, proceeding with requested ${btcCapital.toFixed(8)} BTC uncapped: ${err instanceof Error ? err.message : String(err)}`
+    );
+    usdtPool = 0;
+  }
+
+  const [btcMin, assetMin] = await Promise.all([
     client.getMinOrderSize(pair.btcUsdtSymbol),
     client.getMinOrderSize(pair.assetUsdtSymbol),
   ]);
-  const trancheAmounts = computeTrancheBtcAmounts(btcCapital, config);
-  const plans: TrancheExecutionPlan[] = [];
-  const routeDecisions: RouteDecision[] = [];
+
+  const px = (price: number, side: "buy" | "sell") => Number(marketableLimitPrice(price, side, BUFFER_LIMIT));
+  const fmt = (n: number) => n.toFixed(8);
+  const buyBtcPx = px(btcUsdtPrice, "buy");
+  const sellBtcPx = px(btcUsdtPrice, "sell");
+  const buyAssetPx = px(assetUsdtPrice, "buy");
+  const sellAssetPx = px(assetUsdtPrice, "sell");
+
+  /** Places ONE limit order and waits for it; returns base-currency amount filled. */
+  async function placeAndWait(symbol: string, action: "buy" | "sell", baseAmount: number, limitPx: number): Promise<number> {
+    const result = await client.submitOrder({
+      symbol,
+      amount: action === "buy" ? baseAmount : -baseAmount,
+      price: limitPx >= 1 ? limitPx.toFixed(2) : limitPx.toFixed(8),
+      type: "EXCHANGE LIMIT",
+    });
+    if (result.dryRun) return baseAmount;
+    const id = result.exchangeOrderId;
+    if (!id) {
+      console.error(`[${pair.key}] ${symbol} order submitted but no order id returned - stopping this rotation for safety.`);
+      return 0;
+    }
+    const deadline = Date.now() + fillTimeoutMs;
+    let state = { active: true, filled: 0, original: 0 };
+    for (;;) {
+      await sleep(pollIntervalMs);
+      try {
+        state = await client.getOrderFill(symbol, id);
+      } catch (err) {
+        console.warn(`[${pair.key}] order status read failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (!state.active) return state.filled;
+      if (Date.now() >= deadline) break;
+    }
+    // Timed out: cancel the resting remainder, keep whatever filled.
+    try {
+      await client.cancelOrder(id);
+      await sleep(pollIntervalMs);
+      state = await client.getOrderFill(symbol, id);
+    } catch (err) {
+      console.warn(`[${pair.key}] cancel/final-fill read failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    console.warn(`[${pair.key}] ${symbol} chunk order not fully filled in time: ${fmt(state.filled)} filled, remainder cancelled.`);
+    return state.filled;
+  }
+
+  // Destination asset market (exit with a direct asset destination).
+  let destBuyPx = 0;
+  let destAssetMin = 0;
+  if (destination && destination.mode === "buy") {
+    const c = await client.getCandles(destination.pair.assetUsdtSymbol, "1D", 1);
+    const dp = c[0]?.close ?? 0;
+    destBuyPx = px(dp, "buy");
+    destAssetMin = await client.getMinOrderSize(destination.pair.assetUsdtSymbol);
+    if (destBuyPx <= 0) destination.btcAmount = 0;
+  }
+  let destUsdLeft = destination ? destination.btcAmount * btcUsdtPrice : 0;
+  let destinationRoutedBtc = 0;
+
+  /** Buys `symbol` with up to `usdt`, retrying the unfilled remainder (max 3 orders). */
+  async function convertUsdt(
+    symbol: string,
+    buyPx: number,
+    usdt: number,
+    minOrder: number,
+    onFilled?: (base: number) => void
+  ): Promise<{ ok: boolean; spentUsd: number }> {
+    let left = usdt;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const amt = left / buyPx;
+      if (amt < minOrder || amt <= 0) return { ok: true, spentUsd: usdt - left }; // dust
+      const got = await placeAndWait(symbol, "buy", Number(fmt(amt)), buyPx);
+      onFilled?.(got);
+      left -= got * buyPx;
+      if (got >= amt * 0.999) return { ok: true, spentUsd: usdt - left };
+    }
+    return { ok: false, spentUsd: usdt - left };
+  }
+
+  let remainingUsd = btcCapital * btcUsdtPrice;
   let totalBtcMoved = 0;
+  const minUsd = Math.max(1, chunkUsd * 0.001);
 
-  for (let i = 0; i < config.risk.trancheWeights.length; i++) {
-    const trancheWeight = config.risk.trancheWeights[i]!;
-    const trancheBtcAmount = trancheAmounts[i]!;
-
-    const [directDepth, btcUsdtDepth, assetUsdtDepth, directCandle, btcUsdtCandle, assetUsdtCandle] =
-      await Promise.all([
-        client.getBookDepth(pair.ratioSymbol),
-        client.getBookDepth(pair.btcUsdtSymbol),
-        client.getBookDepth(pair.assetUsdtSymbol),
-        client.getCandles(pair.ratioSymbol, "1D", 1),
-        client.getCandles(pair.btcUsdtSymbol, "1D", 1),
-        client.getCandles(pair.assetUsdtSymbol, "1D", 1),
-      ]);
-    const btcUsdtPrice = btcUsdtCandle[0]?.close ?? 0;
-    const assetUsdtPrice = assetUsdtCandle[0]?.close ?? 0;
-    // pair.ratioSymbol quotes btc-per-asset (see PairConfig.ratioConvention) -
-    // TODO: this assumes that convention rather than reading it from `pair`,
-    // since both current pairs (XAUT, XMR) happen to be btc-per-asset; if a
-    // future pair is asset-per-BTC this needs to invert here too.
-    const directPrice = directCandle[0]?.close ?? 0;
-
-    const comparison = compareExecutionRoutes({
-      side,
-      btcAmount: trancheBtcAmount,
-      directDepth,
-      btcUsdtDepth,
-      assetUsdtDepth,
-      btcUsdtPrice,
-      assetUsdtPrice,
-      directPrice,
-      directMinOrderSize,
-      btcUsdtMinOrderSize,
-      assetUsdtMinOrderSize,
-    });
-    routeDecisions.push({
-      trancheIndex: i,
-      route: comparison.route,
-      directSlippageBtc: comparison.directSlippageBtc,
-      usdtSlippageBtc: comparison.usdtSlippageBtc,
-    });
-    if (comparison.route === "none") {
-      console.warn(`[${pair.key}] tranche ${i} skipped: below Bitfinex minimum order size on every route.`);
-      continue;
-    }
-
-    if (comparison.route === "direct") {
-      const trancheAssetAmount = directPrice > 0 ? trancheBtcAmount / directPrice : 0;
-      const cappedClipCount = capClipCountToMinOrderSize(trancheAssetAmount, config.execution.numClipsPerTranche, directMinOrderSize);
-      if (cappedClipCount <= 0) {
-        console.warn(`[${pair.key}] tranche ${i} skipped: below direct minimum order size.`);
-        continue;
+  while (remainingUsd > minUsd) {
+    const c = Math.min(chunkUsd, remainingUsd);
+    if (enteringAsset) {
+      let partial = false;
+      if (usdtPool < c) {
+        const needUsd = c - usdtPool;
+        const sellBtc = needUsd / sellBtcPx;
+        if (sellBtc < btcMin) break;
+        const f = await placeAndWait(pair.btcUsdtSymbol, "sell", Number(fmt(sellBtc)), sellBtcPx);
+        usdtPool += f * sellBtcPx;
+        if (f < sellBtc * 0.999) partial = true;
       }
-      const plan = planTrancheExecution({
-        trancheId: `${Date.now()}-${pair.key}-direct-${i}`,
-        trancheWeight,
-        side,
-        scheduledStart: Date.now(),
-        config: { ...config.execution, numClipsPerTranche: cappedClipCount },
-      });
-      const evenSlice = trancheAssetAmount / plan.numClips;
-      let remaining = trancheAssetAmount;
-      for (const clip of plan.clips) {
-        const clipAmount = sizeClipAgainstDepth(
-          remaining,
-          evenSlice,
-          directDepth,
-          side,
-          clip.maxFractionOfBookDepth
-        );
-        if (clipAmount <= 0) continue;
-
-        const result = await client.submitOrder({
-          symbol: pair.ratioSymbol,
-          amount: enteringAsset ? clipAmount : -clipAmount,
-          price: marketableLimitPrice(directPrice, enteringAsset ? "buy" : "sell"),
-          type: "EXCHANGE LIMIT",
-        });
-
-        clip.status = result.dryRun ? "pending" : "placed";
-        remaining -= clipAmount;
-        totalBtcMoved += clipAmount * directPrice;
-        if (remaining <= 0) break;
+      const spend = Math.min(c, usdtPool);
+      const assetAmt = spend / buyAssetPx;
+      if (assetAmt < assetMin || assetAmt <= 0) break;
+      const g = await placeAndWait(pair.assetUsdtSymbol, "buy", Number(fmt(assetAmt)), buyAssetPx);
+      usdtPool -= g * buyAssetPx;
+      remainingUsd -= g * assetUsdtPrice;
+      totalBtcMoved += (g * assetUsdtPrice) / btcUsdtPrice;
+      if (g < assetAmt * 0.999 || partial) break;
+    } else {
+      const sellAmt = c / assetUsdtPrice;
+      if (sellAmt < assetMin) break;
+      const f = await placeAndWait(pair.assetUsdtSymbol, "sell", Number(fmt(sellAmt)), sellAssetPx);
+      if (f <= 0) break;
+      remainingUsd -= f * assetUsdtPrice;
+      // The USDT from this chunk MUST be put to work (BTC, or the destination
+      // asset) before the next chunk of the asset is sold: each buy retries up
+      // to 3 orders on whatever USDT is still unspent, and the whole exit stops
+      // if it can't complete.
+      const proceeds = f * sellAssetPx; // lower bound of real USDT received
+      const toDestUsd = Math.min(proceeds, destUsdLeft);
+      destUsdLeft -= toDestUsd;
+      let converted = true;
+      if (destination && toDestUsd > 0) {
+        if (destination.mode === "hold") {
+          destinationRoutedBtc += toDestUsd / btcUsdtPrice; // USDT left in wallet for the destination's own entry
+        } else {
+          const r = await convertUsdt(destination.pair.assetUsdtSymbol, destBuyPx, toDestUsd, destAssetMin);
+          destinationRoutedBtc += (r.spentUsd) / btcUsdtPrice;
+          destUsdLeft += toDestUsd - r.spentUsd; // anything unspent falls back to BTC below
+          if (!r.ok) converted = false;
+        }
       }
-      plans.push(plan);
-      continue;
-    }
-
-    // usdt route: two legs, each executed with the same tranche/clip layering.
-    const legs = enteringAsset
-      ? [
-          { symbol: pair.btcUsdtSymbol, action: "sell" as const, depth: btcUsdtDepth, price: btcUsdtPrice },
-          { symbol: pair.assetUsdtSymbol, action: "buy" as const, depth: assetUsdtDepth, price: assetUsdtPrice },
-        ]
-      : [
-          { symbol: pair.assetUsdtSymbol, action: "sell" as const, depth: assetUsdtDepth, price: assetUsdtPrice },
-          { symbol: pair.btcUsdtSymbol, action: "buy" as const, depth: btcUsdtDepth, price: btcUsdtPrice },
-        ];
-
-    for (const leg of legs) {
-      // Both legs are sized off the same fixed BTC-equivalent tranche amount
-      // (not off the prior leg's actual fill) - correct once in DRY_RUN,
-      // since there's no real fill data yet. Needs real fill reconciliation
-      // between legs once PAPER mode provides actual amounts (same caveat as
-      // the direct route's placeholder limit price below).
-      const legAmount =
-        leg.symbol === pair.btcUsdtSymbol
-          ? trancheBtcAmount
-          : btcUsdtPrice > 0 && assetUsdtPrice > 0
-            ? (trancheBtcAmount * btcUsdtPrice) / assetUsdtPrice
-            : 0;
-      const legSideLabel: "buy_btc_with_xaut" | "sell_btc_for_xaut" =
-        leg.action === "buy" ? "buy_btc_with_xaut" : "sell_btc_for_xaut";
-      const legMinOrderSize = leg.symbol === pair.btcUsdtSymbol ? btcUsdtMinOrderSize : assetUsdtMinOrderSize;
-      const cappedClipCount = capClipCountToMinOrderSize(legAmount, config.execution.numClipsPerTranche, legMinOrderSize);
-      if (cappedClipCount <= 0) {
-        console.warn(`[${pair.key}] tranche ${i} leg ${leg.symbol} skipped: below minimum order size.`);
-        continue;
+      const btcUsd = proceeds - toDestUsd;
+      if (converted && btcUsd > 0) {
+        const r = await convertUsdt(pair.btcUsdtSymbol, buyBtcPx, btcUsd, btcMin, (b) => (totalBtcMoved += b));
+        if (!r.ok) converted = false;
       }
-      const plan = planTrancheExecution({
-        trancheId: `${Date.now()}-${pair.key}-usdt-${leg.symbol}-${i}`,
-        trancheWeight,
-        side: legSideLabel,
-        scheduledStart: Date.now(),
-        config: { ...config.execution, numClipsPerTranche: cappedClipCount },
-      });
-      const evenSlice = legAmount / plan.numClips;
-      let remaining = legAmount;
-      for (const clip of plan.clips) {
-        const clipAmount = sizeClipAgainstDepth(
-          remaining,
-          evenSlice,
-          leg.depth,
-          legSideLabel,
-          clip.maxFractionOfBookDepth
-        );
-        if (clipAmount <= 0) continue;
-
-        const result = await client.submitOrder({
-          symbol: leg.symbol,
-          amount: leg.action === "buy" ? clipAmount : -clipAmount,
-          price: marketableLimitPrice(leg.price, leg.action),
-          type: "EXCHANGE LIMIT",
-        });
-
-        clip.status = result.dryRun ? "pending" : "placed";
-        remaining -= clipAmount;
-        if (leg.symbol === pair.btcUsdtSymbol) totalBtcMoved += clipAmount;
-        if (remaining <= 0) break;
-      }
-      plans.push(plan);
+      if (!converted || f < sellAmt * 0.999) break; // USDT stays idle; retried next tick
     }
   }
 
-  return { plans, totalBtcMoved, routeDecisions };
+  // Proceeds routed to a destination asset (or held as USDT for it) count as moved capital too.
+  return { plans: [], totalBtcMoved: totalBtcMoved + destinationRoutedBtc, routeDecisions, destinationRoutedBtc };
 }

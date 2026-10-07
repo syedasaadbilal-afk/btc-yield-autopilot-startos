@@ -3,7 +3,11 @@ import {
   fetchAllocationOverride,
   fetchBitfinexSecretsStatus,
   fetchConfig,
+  fetchDeployCap,
+  fetchChunkUsd,
+  saveChunkUsd,
   saveAllocationOverride,
+  saveDeployCap,
   saveBitfinexSecrets,
   type ActiveStrategyConfig,
 } from "../api.js";
@@ -156,6 +160,126 @@ function AllocationOverride() {
   );
 }
 
+function DeployCap() {
+  const [enabled, setEnabled] = useState(true);
+  const [maxUsd, setMaxUsd] = useState("10000");
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState<string | undefined>(undefined);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    fetchDeployCap().then((c) => {
+      setEnabled(c.enabled);
+      if (c.maxUsd !== undefined) setMaxUsd(String(c.maxUsd));
+      setLoaded(true);
+    });
+  }, []);
+
+  const parsed = Number(maxUsd);
+  const valid = Number.isFinite(parsed) && parsed > 0;
+
+  async function handleSave() {
+    if (!valid) return;
+    setSaving(true);
+    const result = await saveDeployCap(enabled, parsed);
+    setSaving(false);
+    setNote(result ? "Saved. Takes effect on the next tick." : "Failed to save - check the daemon is reachable.");
+  }
+
+  return (
+    <ConfigSection title="Daily deployment cap">
+      <label className="flex items-center gap-2 pb-2 text-xs text-slate-400">
+        <input type="checkbox" checked={enabled} disabled={!loaded} onChange={(e) => setEnabled(e.target.checked)} />
+        Limit capital deployed into XAUT/XMR per rolling 24h
+      </label>
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-slate-400">USD per day</span>
+          <input
+            type="number"
+            min={1}
+            step={500}
+            value={maxUsd}
+            disabled={!enabled || !loaded}
+            onChange={(e) => setMaxUsd(e.target.value)}
+            className="w-32 bg-ink-950 border border-slate-800 rounded px-2 py-1.5 text-sm text-slate-200 disabled:opacity-40"
+          />
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={saving || !loaded || !valid}
+          className="px-3 py-1.5 rounded text-sm font-medium bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-50 border border-slate-700"
+        >
+          {saving ? "Saving..." : "Save cap"}
+        </button>
+        {note && <p className="text-xs text-amber-400">{note}</p>}
+        <p className="text-xs text-slate-600">
+          Caps how much BTC the bot moves INTO XAUT/XMR (entries, allocation increases and idle top-ups, both pairs
+          combined) so a large deposit is drip-fed instead of hitting a thin order book at once. Exits back to BTC are
+          never capped. Entries larger than the cap finish over several days.
+        </p>
+      </div>
+    </ConfigSection>
+  );
+}
+
+function ChunkSize() {
+  const [chunk, setChunk] = useState("10000");
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState<string | undefined>(undefined);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    fetchChunkUsd().then((c) => {
+      setChunk(String(c));
+      setLoaded(true);
+    });
+  }, []);
+
+  const parsed = Number(chunk);
+  const valid = Number.isFinite(parsed) && parsed >= 100;
+
+  async function handleSave() {
+    if (!valid) return;
+    setSaving(true);
+    const ok = await saveChunkUsd(parsed);
+    setSaving(false);
+    setNote(ok ? "Saved. Takes effect on the next order." : "Failed to save - check the daemon is reachable.");
+  }
+
+  return (
+    <ConfigSection title="Order chunk size">
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-slate-400">USD per limit order</span>
+          <input
+            type="number"
+            min={100}
+            step={1000}
+            value={chunk}
+            disabled={!loaded}
+            onChange={(e) => setChunk(e.target.value)}
+            className="w-32 bg-ink-950 border border-slate-800 rounded px-2 py-1.5 text-sm text-slate-200 disabled:opacity-40"
+          />
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={saving || !loaded || !valid}
+          className="px-3 py-1.5 rounded text-sm font-medium bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-50 border border-slate-700"
+        >
+          {saving ? "Saving..." : "Save chunk size"}
+        </button>
+        {note && <p className="text-xs text-amber-400">{note}</p>}
+        <p className="text-xs text-slate-600">
+          Entries and exits run through USDT pairs as one limit order at a time of this size. The next chunk is placed
+          only after the previous one fills; an order unfilled after 15 minutes is cancelled and the remainder retried
+          on a later tick.
+        </p>
+      </div>
+    </ConfigSection>
+  );
+}
+
 /** Read-only strategy config snapshot - matches Hashrate Autopilot's BRAIINS/DATUM/OCEAN detail-panel style. */
 export function ConfigTab() {
   const [config, setConfig] = useState<ActiveStrategyConfig | undefined>(undefined);
@@ -172,13 +296,15 @@ export function ConfigTab() {
     <div className="space-y-4 p-6">
       <p className="text-xs text-slate-500">
         Live, running config for this daemon - not the dashboard bundle's build-time defaults. Only the Bitfinex
-        credentials and the XAUT/XMR allocation override below are editable from here; everything else requires
+        credentials, the XAUT/XMR allocation override and the daily deployment cap below are editable from here; everything else requires
         changing PairConfig/StrategyConfig and redeploying.
       </p>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <BitfinexCredentials />
         <AllocationOverride />
+        <DeployCap />
+        <ChunkSize />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

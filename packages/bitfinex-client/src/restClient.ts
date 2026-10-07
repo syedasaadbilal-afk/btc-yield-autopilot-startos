@@ -205,8 +205,66 @@ export class BitfinexRestClient {
       body,
     });
     if (!res.ok) throw new Error(`submitOrder failed: ${res.status} ${await res.text()}`);
-    const raw = await res.json();
-    return { submitted: true, dryRun: false, raw };
+    const raw = (await res.json()) as unknown[];
+    // Notification: [MTS, TYPE, MSG_ID, null, [[ID, ...]], CODE, STATUS, TEXT]
+    if (Array.isArray(raw) && raw[6] === "ERROR") {
+      throw new Error(`submitOrder rejected: ${String(raw[7])}`);
+    }
+    const orderRow = Array.isArray(raw) && Array.isArray(raw[4]) ? (raw[4] as unknown[])[0] : undefined;
+    const id = Array.isArray(orderRow) ? orderRow[0] : undefined;
+    return {
+      submitted: true,
+      dryRun: false,
+      raw,
+      ...(id !== undefined && id !== null ? { exchangeOrderId: String(id) } : {}),
+    };
+  }
+
+  private async authPost(path: string, bodyObj: Record<string, unknown> = {}): Promise<unknown> {
+    await this.waitForToken();
+    const body = JSON.stringify(bodyObj);
+    const nonce = this.nonce.next();
+    const res = await this.fetchImpl(`${this.config.baseUrl}/${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...buildAuthHeaders({ apiKey: this.config.apiKey, apiSecret: this.config.apiSecret, path, nonce, body }),
+      },
+      body,
+    });
+    if (!res.ok) throw new Error(`${path} failed: ${res.status} ${await res.text()}`);
+    return res.json();
+  }
+
+  /**
+   * Fill state of an order: active (still resting) or not, plus the filled
+   * amount in the symbol's base currency (absolute value). Looks in active
+   * orders first, then order history. Row layout (both endpoints):
+   * [ID, GID, CID, SYMBOL, MTS_CREATE, MTS_UPDATE, AMOUNT(remaining), AMOUNT_ORIG, ...]
+   */
+  async getOrderFill(symbol: string, orderId: string): Promise<{ active: boolean; filled: number; original: number }> {
+    const idNum = Number(orderId);
+    const find = (rows: unknown): unknown[] | undefined =>
+      Array.isArray(rows) ? (rows as unknown[][]).find((r) => Array.isArray(r) && Number(r[0]) === idNum) : undefined;
+    const activeRow = find(await this.authPost("v2/auth/r/orders"));
+    if (activeRow) {
+      const rem = Math.abs(Number(activeRow[6]));
+      const orig = Math.abs(Number(activeRow[7]));
+      return { active: true, filled: Math.max(0, orig - rem), original: orig };
+    }
+    const histRow = find(await this.authPost(`v2/auth/r/orders/${symbol}/hist`, { id: [idNum] }));
+    if (histRow) {
+      const rem = Math.abs(Number(histRow[6]));
+      const orig = Math.abs(Number(histRow[7]));
+      return { active: false, filled: Math.max(0, orig - rem), original: orig };
+    }
+    // Neither list has it yet (propagation lag) - report unknown as still active, nothing filled.
+    return { active: true, filled: 0, original: 0 };
+  }
+
+  async cancelOrder(orderId: string): Promise<void> {
+    if (this.config.runMode === "DRY_RUN") return;
+    await this.authPost("v2/auth/w/order/cancel", { id: Number(orderId) });
   }
 
   private async waitForToken(): Promise<void> {

@@ -6,6 +6,13 @@ import { applyMigrations } from "../src/db/migrate.js";
 import { Repo } from "../src/db/repo.js";
 import { runControlLoopIteration } from "../src/loop.js";
 
+// These tests use synthetic prices/amounts far above any real $/day cap and test
+// allocation behavior, not the cap (see loop.deploy-cap.test.ts).
+const NO_DEPLOY_CAP_CONFIG = {
+  ...DEFAULT_STRATEGY_CONFIG,
+  execution: { ...DEFAULT_STRATEGY_CONFIG.execution, maxDeployUsdPerDay: Infinity },
+};
+
 const XAUT_SYMBOL = "tXAUT:BTC";
 const XMR_SYMBOL = "tXMRBTC";
 
@@ -75,7 +82,7 @@ describe("funding baseline reset on real cross-pair reallocation", () => {
       { [XAUT_SYMBOL]: STAYS_NAVY_CLOSES, [XMR_SYMBOL]: STAYS_NAVY_CLOSES },
       FRESH_BTC_ONLY_WALLET
     );
-    await runControlLoopIteration({ client: settleClient, repo, config: DEFAULT_STRATEGY_CONFIG });
+    await runControlLoopIteration({ client: settleClient, repo, config: NO_DEPLOY_CAP_CONFIG });
 
     // Tick 1: both pairs enter orange together -> 50/50 dual-gold split.
     const TICK1_ENTRY_CLOSES = [...STAYS_NAVY_CLOSES, ...linearRamp(100, 102, 40)];
@@ -83,7 +90,7 @@ describe("funding baseline reset on real cross-pair reallocation", () => {
       { [XAUT_SYMBOL]: TICK1_ENTRY_CLOSES, [XMR_SYMBOL]: TICK1_ENTRY_CLOSES },
       ESTABLISHED_WALLET
     );
-    const tick1 = await runControlLoopIteration({ client: tick1Client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    const tick1 = await runControlLoopIteration({ client: tick1Client, repo, config: NO_DEPLOY_CAP_CONFIG });
     expect(tick1.find((r) => r.pairKey === "xaut")!.targetFraction).toBeCloseTo(0.5);
 
     const baselineAfterTick1 = repo.getFundingBaseline("xaut");
@@ -93,7 +100,7 @@ describe("funding baseline reset on real cross-pair reallocation", () => {
 
     // Tick 2 (same closes, nothing changes): an ordinary re-evaluation where
     // the target fraction stays 0.5 - baseline must NOT move.
-    const tick2 = await runControlLoopIteration({ client: tick1Client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    const tick2 = await runControlLoopIteration({ client: tick1Client, repo, config: NO_DEPLOY_CAP_CONFIG });
     expect(tick2.find((r) => r.pairKey === "xaut")!.targetFraction).toBeCloseTo(0.5);
     const baselineAfterTick2 = repo.getFundingBaseline("xaut");
     expect(baselineAfterTick2!.btcEquivalentNav).toBeCloseTo(navAfterTick1);
@@ -108,7 +115,7 @@ describe("funding baseline reset on real cross-pair reallocation", () => {
       { [XAUT_SYMBOL]: TICK1_ENTRY_CLOSES, [XMR_SYMBOL]: TICK3_XMR_CLOSES },
       ESTABLISHED_WALLET
     );
-    const tick3 = await runControlLoopIteration({ client: tick3Client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    const tick3 = await runControlLoopIteration({ client: tick3Client, repo, config: NO_DEPLOY_CAP_CONFIG });
     const xaut3 = tick3.find((r) => r.pairKey === "xaut")!;
     expect(xaut3.targetFraction).toBeCloseTo(1);
     expect(xaut3.rotated).toBe(true);
