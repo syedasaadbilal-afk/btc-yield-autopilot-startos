@@ -329,6 +329,20 @@ export async function createServer(opts: CreateServerOptions) {
     return { enabled, maxUsd: enabled ? maxUsd : undefined };
   });
 
+  // Required cash (USDT) kept in the wallet; positions are sold down pro rata to raise it.
+  fastify.get("/api/cash-reserve", async () => ({ usdt: opts.repo.getCashReserveUsd() }));
+
+  fastify.put("/api/cash-reserve", async (req, reply) => {
+    const usdt = (req.body as { usdt?: number } | undefined)?.usdt;
+    if (typeof usdt !== "number" || !Number.isFinite(usdt) || usdt < 0) {
+      reply.code(400);
+      return { error: "usdt must be a number >= 0" };
+    }
+    opts.repo.setCashReserveUsd(usdt);
+    console.log(`[autopilot] required cash changed via dashboard -> $${usdt} USDT`);
+    return { usdt };
+  });
+
   // Phased-order chunk size (USD per limit order, one open at a time).
   fastify.get("/api/chunk-size", async () => ({
     chunkUsd: opts.repo.getChunkUsd(DEFAULT_STRATEGY_CONFIG.execution.chunkUsd ?? 10_000),

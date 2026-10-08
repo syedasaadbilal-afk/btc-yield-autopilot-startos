@@ -33,8 +33,35 @@ export interface SpotOrderResult {
 
 type FetchLike = typeof fetch;
 
+/**
+ * One nonce source and ONE request queue for every authenticated call in the
+ * process. The daemon and the dashboard server each build their own client
+ * with the same API key; separate nonce counters plus concurrent in-flight
+ * requests caused live "nonce: small" (10114) rejections (Oct 2026), which
+ * stalled order-fill polling. Serializing guarantees nonce order matches
+ * arrival order; a 10114 is retried once with a fresh nonce.
+ */
+const SHARED_NONCE = new MonotonicNonce();
+let authChain: Promise<unknown> = Promise.resolve();
+function serializedAuth<T>(fn: () => Promise<T>): Promise<T> {
+  const run = authChain.then(fn, fn);
+  authChain = run.catch(() => undefined);
+  return run;
+}
+async function withNonceRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await serializedAuth(fn);
+  } catch (err) {
+    if (err instanceof Error && /10114|nonce: small/i.test(err.message)) {
+      await new Promise((r) => setTimeout(r, 50));
+      return serializedAuth(fn);
+    }
+    throw err;
+  }
+}
+
 export class BitfinexRestClient {
-  private readonly nonce = new MonotonicNonce();
+  private readonly nonce = SHARED_NONCE;
   private readonly limiter = new RateLimiter(30, 30 / 60_000); // ~30 req/min, conservative default
   // Cache for getMinOrderSize (task #94) - minimum order sizes are an
   // exchange config value, not a live market figure, so a long TTL avoids
@@ -130,7 +157,11 @@ export class BitfinexRestClient {
    * the balance cap (execute.ts) both need to be trustworthy in every run
    * mode, not just LIVE.
    */
-  async getWallets(): Promise<WalletBalance[]> {
+  getWallets(): Promise<WalletBalance[]> {
+    return withNonceRetry(() => this.getWalletsRaw());
+  }
+
+  private async getWalletsRaw(): Promise<WalletBalance[]> {
     await this.waitForToken();
     const path = "v2/auth/r/wallets";
     const body = "";
@@ -172,7 +203,12 @@ export class BitfinexRestClient {
    * (the daemon's gate stage should already prevent this call in DRY_RUN,
    * but the client itself refuses too).
    */
-  async submitOrder(order: SpotOrderRequest): Promise<SpotOrderResult> {
+  submitOrder(order: SpotOrderRequest): Promise<SpotOrderResult> {
+    if (this.config.runMode === "DRY_RUN") return this.submitOrderRaw(order);
+    return withNonceRetry(() => this.submitOrderRaw(order));
+  }
+
+  private async submitOrderRaw(order: SpotOrderRequest): Promise<SpotOrderResult> {
     if (this.config.runMode === "DRY_RUN") {
       // eslint-disable-next-line no-console
       console.log("[DRY_RUN] would submit order:", order);
@@ -220,7 +256,11 @@ export class BitfinexRestClient {
     };
   }
 
-  private async authPost(path: string, bodyObj: Record<string, unknown> = {}): Promise<unknown> {
+  private authPost(path: string, bodyObj: Record<string, unknown> = {}): Promise<unknown> {
+    return withNonceRetry(() => this.authPostRaw(path, bodyObj));
+  }
+
+  private async authPostRaw(path: string, bodyObj: Record<string, unknown> = {}): Promise<unknown> {
     await this.waitForToken();
     const body = JSON.stringify(bodyObj);
     const nonce = this.nonce.next();

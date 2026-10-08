@@ -387,6 +387,20 @@ export class Repo {
     return { enabled: row.enabled === 1, maxUsd: row.enabled === 1 ? row.max_usd_per_day : undefined };
   }
 
+  getCashReserveUsd(): number {
+    const row = this.db.prepare("SELECT usdt FROM cash_reserve WHERE id = 1").get() as { usdt: number } | undefined;
+    return row?.usdt ?? 0;
+  }
+
+  setCashReserveUsd(usdt: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO cash_reserve (id, usdt, updated_at) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET usdt = excluded.usdt, updated_at = excluded.updated_at`
+      )
+      .run(usdt, Date.now());
+  }
+
   getChunkUsd(configDefaultUsd: number): number {
     const row = this.db.prepare("SELECT chunk_usd FROM chunk_size WHERE id = 1").get() as { chunk_usd: number } | undefined;
     return row?.chunk_usd ?? configDefaultUsd;

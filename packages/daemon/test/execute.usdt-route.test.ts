@@ -129,4 +129,27 @@ describe("executeRotation - mandated USDT routing", () => {
     expect(bal.XAUT ?? 0).toBe(0);
     expect(bal.BTC! * BTC_USD).toBeGreaterThan(9_000);
   });
+
+  it("full-USDT entry never tries to sell BTC it doesn't have (live 10/8 regression)", async () => {
+    // $60,000 USDT, ~0 BTC; ask for slightly MORE than the USDT covers.
+    const { client, orders, bal } = fake({ BTC: 0.00000076, UST: 60_000, XMR: 0 });
+    await expect(
+      executeRotation({ client, side: "sell_btc_for_xaut", btcCapital: 0.6, pair: XMR, config: DEFAULT_STRATEGY_CONFIG, chunkUsd: 2_000, ...fillWait })
+    ).resolves.toBeDefined();
+    expect(orders.some((o) => o.symbol === XMR.btcUsdtSymbol)).toBe(false);
+    expect(bal.XMR! * XMR_USD).toBeGreaterThan(58_000);
+  });
+
+  it("an exchange error mid-rotation keeps the progress instead of throwing it away", async () => {
+    const { client, orders } = fake({ BTC: 0, UST: 60_000, XMR: 0 });
+    const real = client.submitOrder.bind(client);
+    let n = 0;
+    (client as unknown as { submitOrder: unknown }).submitOrder = async (o: never) => {
+      if (++n === 3) throw new Error("submitOrder failed: 500 not enough exchange balance");
+      return real(o);
+    };
+    const r = await executeRotation({ client, side: "sell_btc_for_xaut", btcCapital: 0.5, pair: XMR, config: DEFAULT_STRATEGY_CONFIG, chunkUsd: 2_000, ...fillWait });
+    expect(orders.length).toBe(2);
+    expect(r.totalBtcMoved).toBeGreaterThan(0);
+  });
 });

@@ -12,7 +12,7 @@ import {
 import type { BitfinexRestClient } from "@autopilot/bitfinex-client";
 import type { Repo } from "./db/repo.js";
 import { gate } from "./gate.js";
-import { executeRotation } from "./execute.js";
+import { executeRotation, sellHoldingForUsdt } from "./execute.js";
 
 export interface LoopDeps {
   client: BitfinexRestClient;
@@ -263,7 +263,84 @@ export interface WalletBasis {
   assetBalanceByPairKey: Record<string, number>;
   /** Idle deployable capital in BTC terms: BTC wallet + USDT wallet converted at BTC/USDT. */
   btcBalance: number;
+  /** Raw BTC wallet balance (excludes USDT). */
+  rawBtcBalance: number;
+  /** Total USDT in the wallet, and the operator's required cash (USDT). */
+  usdtBalance: number;
+  reserveUsd: number;
+  /** BTC/USDT price used for conversions (0 if unavailable). */
+  btcUsd: number;
   source: "wallet" | "internal_nav_fallback";
+}
+
+
+/**
+ * Required cash (USDT): when the wallet's USDT is below the operator's
+ * target, sell every holding (each flat pair's asset, plus the raw BTC
+ * wallet) down by the SAME fraction through its own USDT pair, one limit
+ * order at a time. Returns true if any cash was raised (caller re-reads the
+ * wallet).
+ */
+async function raiseRequiredCash(
+  deps: LoopDeps,
+  observations: PairObservation[],
+  basis: WalletBasis
+): Promise<boolean> {
+  const { client, repo } = deps;
+  if (basis.source !== "wallet" || basis.reserveUsd <= 0 || basis.btcUsd <= 0) return false;
+  if (repo.getRunMode() === "PAUSED") return false;
+  const shortfallUsd = basis.reserveUsd - basis.usdtBalance;
+  if (shortfallUsd < Math.max(20, basis.reserveUsd * 0.01)) return false;
+
+  const holdings: Array<{ key: string; symbol: string; units: number; valueBtc: number }> = [];
+  for (const o of observations) {
+    const units = basis.assetBalanceByPairKey[o.pair.key] ?? 0;
+    const valueBtc = basis.currentValueByPairKey[o.pair.key] ?? 0;
+    if (o.currentPosition === "flat" && units > 0 && valueBtc > 0) {
+      holdings.push({ key: o.pair.key, symbol: o.pair.assetUsdtSymbol, units, valueBtc });
+    }
+  }
+  if (basis.rawBtcBalance > 0 && observations[0]) {
+    holdings.push({ key: "btc", symbol: observations[0].pair.btcUsdtSymbol, units: basis.rawBtcBalance, valueBtc: basis.rawBtcBalance });
+  }
+  const totalValueBtc = holdings.reduce((s, h) => s + h.valueBtc, 0);
+  if (totalValueBtc <= 0) return false;
+  const shortfallBtc = (shortfallUsd / basis.btcUsd) * 1.005; // small buffer for limit-price slippage
+  const fraction = Math.min(1, shortfallBtc / totalValueBtc);
+  const chunkUsd = repo.getChunkUsd(deps.config.execution.chunkUsd ?? 10_000);
+  console.log(
+    `[cash] required cash $${basis.reserveUsd.toFixed(2)} vs USDT $${basis.usdtBalance.toFixed(2)}: selling ${(fraction * 100).toFixed(2)}% of every holding to raise ~$${shortfallUsd.toFixed(2)}.`
+  );
+  let raisedAny = false;
+  for (const h of holdings) {
+    const usdTarget = h.valueBtc * fraction * basis.btcUsd;
+    const raised = await sellHoldingForUsdt({
+      client,
+      pairKey: h.key,
+      symbol: h.symbol,
+      usdTarget,
+      baseAvailable: h.units,
+      chunkUsd,
+    });
+    if (raised > 0) {
+      raisedAny = true;
+      console.log(`[cash] ${h.key}: raised $${raised.toFixed(2)} USDT.`);
+      if (h.key !== "btc") {
+        repo.insertExecutionLog({
+          id: `${h.key}-${deps.now ?? Date.now()}-cash`,
+          pairKey: h.key,
+          timestamp: deps.now ?? Date.now(),
+          kind: "resize",
+          side: "buy_btc_with_xaut",
+          requestedBtc: usdTarget / basis.btcUsd,
+          movedBtc: raised / basis.btcUsd,
+          status: "executed",
+          routes: "usdt-cash",
+        });
+      }
+    }
+  }
+  return raisedAny;
 }
 
 async function computeWalletBasis(
@@ -279,11 +356,14 @@ async function computeWalletBasis(
     const usdtBalance = wallets
       .filter((w) => w.currency === "UST" || w.currency === "USDT")
       .reduce((s, w) => s + w.balance, 0);
+    const reserveUsd = repo.getCashReserveUsd();
     let usdtBtc = 0;
-    if (usdtBalance > 0 && observations[0]) {
+    let btcUsd = 0;
+    if ((usdtBalance > 0 || reserveUsd > 0) && observations[0]) {
       const c = await client.getCandles(observations[0].pair.btcUsdtSymbol, "1D", 1);
-      const btcUsd = c[0]?.close ?? 0;
-      if (btcUsd > 0) usdtBtc = usdtBalance / btcUsd;
+      btcUsd = c[0]?.close ?? 0;
+      // Only USDT above the required cash counts as deployable capital.
+      if (btcUsd > 0) usdtBtc = Math.max(0, usdtBalance - reserveUsd) / btcUsd;
     }
     const btcBalance = btcWalletBalance + usdtBtc;
     const currentValueByPairKey: Record<string, number> = {};
@@ -302,7 +382,7 @@ async function computeWalletBasis(
     }
     const totalPortfolioBtc = btcBalance + assetsTotalBtc;
     if (totalPortfolioBtc > 0) {
-      return { totalPortfolioBtc, currentValueByPairKey, assetBalanceByPairKey, btcBalance, source: "wallet" };
+      return { totalPortfolioBtc, currentValueByPairKey, assetBalanceByPairKey, btcBalance, rawBtcBalance: btcWalletBalance, usdtBalance, reserveUsd, btcUsd, source: "wallet" };
     }
     console.warn("[walletBasis] wallet read returned a zero/empty total, falling back to internal NAV tracking.");
   } catch (err) {
@@ -317,7 +397,7 @@ async function computeWalletBasis(
   for (const o of observations) {
     currentValueByPairKey[o.pair.key] = repo.getLatestNavPoint(o.pair.key)?.btcEquivalentNav ?? 0;
   }
-  return { totalPortfolioBtc, currentValueByPairKey, assetBalanceByPairKey: {}, btcBalance: 0, source: "internal_nav_fallback" };
+  return { totalPortfolioBtc, currentValueByPairKey, assetBalanceByPairKey: {}, btcBalance: 0, rawBtcBalance: 0, usdtBalance: 0, reserveUsd: 0, btcUsd: 0, source: "internal_nav_fallback" };
 }
 
 /**
@@ -456,6 +536,7 @@ async function gateAndExecute(
           pair,
           config,
           chunkUsd: repo.getChunkUsd(config.execution.chunkUsd ?? 10_000),
+          reserveUsd: repo.getCashReserveUsd(),
           ...(decision.target === "long" && exitDestination && exitDestination.btcAmount > 0
             ? { destination: { ...exitDestination } }
             : {}),
@@ -624,7 +705,8 @@ async function gateAndExecute(
           console.log(
             `[${pair.key}] resizing allocation ${lastAppliedFraction !== undefined ? (lastAppliedFraction * 100).toFixed(0) + "%" : "unset"} -> ${(targetFraction * 100).toFixed(0)}% (${resizeBtcCapital.toFixed(8)} BTC, side ${side}, dual-gold target: ${isDualGoldState})`
           );
-          const executeResult = await executeRotation({ client, side, btcCapital: resizeBtcCapital, pair, config, chunkUsd: repo.getChunkUsd(config.execution.chunkUsd ?? 10_000) });
+          const executeResult = await executeRotation({ client, side, btcCapital: resizeBtcCapital, pair, config, chunkUsd: repo.getChunkUsd(config.execution.chunkUsd ?? 10_000),
+          reserveUsd: repo.getCashReserveUsd() });
           for (const rd of executeResult.routeDecisions) {
             console.log(
               `[${pair.key}] resize tranche ${rd.trancheIndex} routed via "${rd.route}" (direct ${rd.directSlippageBtc.toFixed(6)} BTC vs usdt ${rd.usdtSlippageBtc.toFixed(6)} BTC estimated slippage)`
@@ -681,6 +763,7 @@ async function gateAndExecute(
           pair,
           config,
           chunkUsd: repo.getChunkUsd(config.execution.chunkUsd ?? 10_000),
+          reserveUsd: repo.getCashReserveUsd(),
         });
         for (const rd of executeResult.routeDecisions) {
           console.log(
@@ -890,7 +973,12 @@ export async function runControlLoopIteration(deps: LoopDeps): Promise<PairLoopR
   const isDualGoldState =
     allocation !== undefined && Math.abs(allocation.xaut - 0.5) < 1e-9 && Math.abs(allocation.xmr - 0.5) < 1e-9;
 
-  const walletBasis = await computeWalletBasis(deps.client, observations, deps.repo, deps.config);
+  let walletBasis = await computeWalletBasis(deps.client, observations, deps.repo, deps.config);
+  // Required cash: sell holdings pro rata to reach the operator's USDT target,
+  // then re-read the wallet so everything below sizes off the new balances.
+  if (await raiseRequiredCash(deps, observations, walletBasis)) {
+    walletBasis = await computeWalletBasis(deps.client, observations, deps.repo, deps.config);
+  }
 
   // Steer any idle/top-up BTC sitting in the wallet (a fresh deposit, manual
   // funding, leftover dust, etc.) toward whichever pair should receive it -

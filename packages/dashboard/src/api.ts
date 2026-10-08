@@ -178,6 +178,23 @@ export async function saveChunkUsd(chunkUsd: number): Promise<boolean> {
   }
 }
 
+export async function fetchCashReserve(): Promise<number> {
+  return (await getJson<{ usdt: number }>("/api/cash-reserve"))?.usdt ?? 0;
+}
+
+export async function saveCashReserve(usdt: number): Promise<boolean> {
+  try {
+    const res = await fetch("/api/cash-reserve", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ usdt }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function setRunMode(mode: RunMode): Promise<void> {
   await fetch("/api/run-mode", {
     method: "PUT",

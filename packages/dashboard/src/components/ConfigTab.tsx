@@ -5,6 +5,8 @@ import {
   fetchConfig,
   fetchDeployCap,
   fetchChunkUsd,
+  fetchCashReserve,
+  saveCashReserve,
   saveChunkUsd,
   saveAllocationOverride,
   saveDeployCap,
@@ -223,6 +225,63 @@ function DeployCap() {
   );
 }
 
+function CashReserve() {
+  const [usdt, setUsdt] = useState("0");
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState<string | undefined>(undefined);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    fetchCashReserve().then((c) => {
+      setUsdt(String(c));
+      setLoaded(true);
+    });
+  }, []);
+
+  const parsed = Number(usdt);
+  const valid = Number.isFinite(parsed) && parsed >= 0;
+
+  async function handleSave() {
+    if (!valid) return;
+    setSaving(true);
+    const ok = await saveCashReserve(parsed);
+    setSaving(false);
+    setNote(ok ? "Saved. Takes effect on the next tick (click Run decision now to apply immediately)." : "Failed to save - check the daemon is reachable.");
+  }
+
+  return (
+    <ConfigSection title="Required cash (USDT)">
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-slate-400">USDT to keep as cash</span>
+          <input
+            type="number"
+            min={0}
+            step={100}
+            value={usdt}
+            disabled={!loaded}
+            onChange={(e) => setUsdt(e.target.value)}
+            className="w-32 bg-ink-950 border border-slate-800 rounded px-2 py-1.5 text-sm text-slate-200 disabled:opacity-40"
+          />
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={saving || !loaded || !valid}
+          className="px-3 py-1.5 rounded text-sm font-medium bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-50 border border-slate-700"
+        >
+          {saving ? "Saving..." : "Save required cash"}
+        </button>
+        {note && <p className="text-xs text-amber-400">{note}</p>}
+        <p className="text-xs text-slate-600">
+          If the wallet holds less USDT than this, every holding (XAUT, XMR and BTC) is sold down by the same
+          percentage through its own USDT pair, one limit order at a time, until the target is reached. USDT up to this
+          amount is never deployed into XAUT/XMR; only USDT above it is. Set 0 to turn off.
+        </p>
+      </div>
+    </ConfigSection>
+  );
+}
+
 function ChunkSize() {
   const [chunk, setChunk] = useState("10000");
   const [saving, setSaving] = useState(false);
@@ -305,6 +364,7 @@ export function ConfigTab() {
         <AllocationOverride />
         <DeployCap />
         <ChunkSize />
+        <CashReserve />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

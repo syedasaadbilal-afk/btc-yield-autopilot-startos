@@ -36,6 +36,103 @@ export interface ExecuteRotationResult {
   destinationRoutedBtc?: number;
 }
 
+
+interface OrderWaitOpts {
+  pairKey: string;
+  fillTimeoutMs: number;
+  pollIntervalMs: number;
+}
+
+const sleepMs = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
+
+/** Places ONE limit order and waits for it; returns base-currency amount filled (0 on any failure to confirm). */
+export async function placeLimitAndWait(
+  client: BitfinexRestClient,
+  opts: OrderWaitOpts,
+  symbol: string,
+  action: "buy" | "sell",
+  baseAmount: number,
+  limitPx: number
+): Promise<{ filled: number; dry: boolean }> {
+  const result = await client.submitOrder({
+    symbol,
+    amount: action === "buy" ? baseAmount : -baseAmount,
+    price: limitPx >= 1 ? limitPx.toFixed(2) : limitPx.toFixed(8),
+    type: "EXCHANGE LIMIT",
+  });
+  if (result.dryRun) return { filled: baseAmount, dry: true };
+  const id = result.exchangeOrderId;
+  if (!id) {
+    console.error(`[${opts.pairKey}] ${symbol} order submitted but no order id returned - stopping for safety.`);
+    return { filled: 0, dry: false };
+  }
+  const deadline = Date.now() + opts.fillTimeoutMs;
+  let state = { active: true, filled: 0, original: 0 };
+  for (;;) {
+    await sleepMs(opts.pollIntervalMs);
+    try {
+      state = await client.getOrderFill(symbol, id);
+    } catch (err) {
+      console.warn(`[${opts.pairKey}] order status read failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (!state.active) return { filled: state.filled, dry: false };
+    if (Date.now() >= deadline) break;
+  }
+  // Timed out: cancel the resting remainder, keep whatever filled.
+  try {
+    await client.cancelOrder(id);
+    await sleepMs(opts.pollIntervalMs);
+    state = await client.getOrderFill(symbol, id);
+  } catch (err) {
+    console.warn(`[${opts.pairKey}] cancel/final-fill read failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  console.warn(`[${opts.pairKey}] ${symbol} order not fully filled in time: ${state.filled.toFixed(8)} filled, remainder cancelled.`);
+  return { filled: state.filled, dry: false };
+}
+
+/**
+ * Sells up to `usdTarget` worth of a holding for USDT, in chunks of `chunkUsd`,
+ * one limit order at a time (each must fill before the next). `symbol` is the
+ * holding's USDT pair (e.g. tXMRUST, tBTCUST); `baseAvailable` caps the amount
+ * in the holding's own units. Returns USD actually raised (lower-bounded by the
+ * sell limit price). Never throws; stops on any partial fill or error.
+ */
+export async function sellHoldingForUsdt(params: {
+  client: BitfinexRestClient;
+  pairKey: string;
+  symbol: string;
+  usdTarget: number;
+  baseAvailable: number;
+  chunkUsd: number;
+  fillTimeoutMs?: number;
+  pollIntervalMs?: number;
+}): Promise<number> {
+  const { client, symbol, chunkUsd } = params;
+  const opts = { pairKey: params.pairKey, fillTimeoutMs: params.fillTimeoutMs ?? 15 * 60_000, pollIntervalMs: params.pollIntervalMs ?? 5_000 };
+  let raised = 0;
+  try {
+    const candle = await client.getCandles(symbol, "1D", 1);
+    const price = candle[0]?.close ?? 0;
+    if (price <= 0) return 0;
+    const minOrder = await client.getMinOrderSize(symbol);
+    const sellPx = Number(marketableLimitPrice(price, "sell", 0.005));
+    let remainingUsd = params.usdTarget;
+    let baseLeft = params.baseAvailable * 0.998;
+    while (remainingUsd > 1) {
+      const baseAmt = Math.min(Math.min(chunkUsd, remainingUsd) / price, baseLeft);
+      if (baseAmt <= 0 || baseAmt < minOrder) break;
+      const r = await placeLimitAndWait(client, opts, symbol, "sell", Number(baseAmt.toFixed(8)), sellPx);
+      raised += r.filled * sellPx;
+      baseLeft -= r.filled;
+      remainingUsd -= r.filled * sellPx;
+      if (r.filled < baseAmt * 0.999) break;
+    }
+  } catch (err) {
+    console.error(`[${params.pairKey}] cash raise via ${symbol} interrupted: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return raised;
+}
+
 const BUFFER_FRACTION = 0.01;
 const BUFFER_LIMIT = 0.005;
 
@@ -67,6 +164,8 @@ export async function executeRotation(params: {
   /** How long one chunk order may rest before it is cancelled. Default 15 min. */
   fillTimeoutMs?: number;
   pollIntervalMs?: number;
+  /** USDT the operator wants kept as cash: never spent by entries. */
+  reserveUsd?: number;
   /**
    * Exit only: send up to `btcAmount` (BTC-equivalent) of the proceeds toward
    * another pair's asset instead of BTC. mode "buy": buy that asset directly
@@ -77,6 +176,7 @@ export async function executeRotation(params: {
   destination?: { pair: PairConfig; btcAmount: number; mode: "buy" | "hold" };
 }): Promise<ExecuteRotationResult> {
   const { client, side, pair, config, destination } = params;
+  const reserveUsd = params.reserveUsd ?? 0;
   const enteringAsset = side === "sell_btc_for_xaut";
   const chunkUsd = params.chunkUsd ?? config.execution.chunkUsd ?? DEFAULT_CHUNK_USD;
   const fillTimeoutMs = params.fillTimeoutMs ?? 15 * 60_000;
@@ -98,11 +198,13 @@ export async function executeRotation(params: {
   // Cap to what is really spendable now, BTC-equivalent.
   let btcCapital = params.btcCapital;
   let usdtPool = 0; // idle USDT we may spend (entries)
+  let btcPool = 0; // BTC we may sell for a shortfall (entries)
   try {
     const wallets = await client.getWallets();
     const btcAvail = wallets.find((w) => w.currency === "BTC")?.availableBalance ?? 0;
-    const ustAvail = usdtAvailable(wallets);
+    const ustAvail = Math.max(0, usdtAvailable(wallets) - reserveUsd);
     usdtPool = enteringAsset ? ustAvail * (1 - BUFFER_FRACTION) : 0;
+    btcPool = enteringAsset ? btcAvail * (1 - BUFFER_FRACTION) : 0;
     const availableBtc = enteringAsset
       ? btcAvail + ustAvail / btcUsdtPrice
       : ((wallets.find((w) => w.currency === pair.assetCurrency)?.availableBalance ?? 0) * assetUsdtPrice) / btcUsdtPrice;
@@ -132,43 +234,13 @@ export async function executeRotation(params: {
   const buyAssetPx = px(assetUsdtPrice, "buy");
   const sellAssetPx = px(assetUsdtPrice, "sell");
 
-  /** Places ONE limit order and waits for it; returns base-currency amount filled. */
-  async function placeAndWait(symbol: string, action: "buy" | "sell", baseAmount: number, limitPx: number): Promise<number> {
-    const result = await client.submitOrder({
-      symbol,
-      amount: action === "buy" ? baseAmount : -baseAmount,
-      price: limitPx >= 1 ? limitPx.toFixed(2) : limitPx.toFixed(8),
-      type: "EXCHANGE LIMIT",
-    });
-    if (result.dryRun) return baseAmount;
-    const id = result.exchangeOrderId;
-    if (!id) {
-      console.error(`[${pair.key}] ${symbol} order submitted but no order id returned - stopping this rotation for safety.`);
-      return 0;
-    }
-    const deadline = Date.now() + fillTimeoutMs;
-    let state = { active: true, filled: 0, original: 0 };
-    for (;;) {
-      await sleep(pollIntervalMs);
-      try {
-        state = await client.getOrderFill(symbol, id);
-      } catch (err) {
-        console.warn(`[${pair.key}] order status read failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      if (!state.active) return state.filled;
-      if (Date.now() >= deadline) break;
-    }
-    // Timed out: cancel the resting remainder, keep whatever filled.
-    try {
-      await client.cancelOrder(id);
-      await sleep(pollIntervalMs);
-      state = await client.getOrderFill(symbol, id);
-    } catch (err) {
-      console.warn(`[${pair.key}] cancel/final-fill read failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    console.warn(`[${pair.key}] ${symbol} chunk order not fully filled in time: ${fmt(state.filled)} filled, remainder cancelled.`);
-    return state.filled;
-  }
+  let isLive = false; // becomes true once a real (non-dry-run) order has been placed
+  const orderOpts = { pairKey: pair.key, fillTimeoutMs, pollIntervalMs };
+  const placeAndWait = async (symbol: string, action: "buy" | "sell", baseAmount: number, limitPx: number): Promise<number> => {
+    const r = await placeLimitAndWait(client, orderOpts, symbol, action, baseAmount, limitPx);
+    if (!r.dry) isLive = true;
+    return r.filled;
+  };
 
   // Destination asset market (exit with a direct asset destination).
   let destBuyPx = 0;
@@ -207,25 +279,42 @@ export async function executeRotation(params: {
   let totalBtcMoved = 0;
   const minUsd = Math.max(1, chunkUsd * 0.001);
 
+  try {
   while (remainingUsd > minUsd) {
     const c = Math.min(chunkUsd, remainingUsd);
     if (enteringAsset) {
+      // Re-sync spendable USDT/BTC from the real wallet each chunk so local
+      // accounting drift (limit-price buffers, fees, partials) can never make
+      // us over-spend or try to sell BTC we don't have.
+      if (isLive) {
+        try {
+          const w = await client.getWallets();
+          usdtPool = Math.max(0, usdtAvailable(w) - reserveUsd) * (1 - 0.002);
+          btcPool = (w.find((x) => x.currency === "BTC")?.availableBalance ?? 0) * (1 - 0.002);
+        } catch {
+          // keep local accounting
+        }
+      }
       let partial = false;
       if (usdtPool < c) {
         const needUsd = c - usdtPool;
-        const sellBtc = needUsd / sellBtcPx;
-        if (sellBtc < btcMin) break;
-        const f = await placeAndWait(pair.btcUsdtSymbol, "sell", Number(fmt(sellBtc)), sellBtcPx);
-        usdtPool += f * sellBtcPx;
-        if (f < sellBtc * 0.999) partial = true;
+        const sellBtc = Math.min(needUsd / sellBtcPx, btcPool);
+        if (sellBtc >= btcMin && sellBtc * sellBtcPx >= minUsd) {
+          const f = await placeAndWait(pair.btcUsdtSymbol, "sell", Number(fmt(sellBtc)), sellBtcPx);
+          usdtPool += f * sellBtcPx;
+          btcPool -= f;
+          if (f < sellBtc * 0.999) partial = true;
+        }
       }
       const spend = Math.min(c, usdtPool);
       const assetAmt = spend / buyAssetPx;
-      if (assetAmt < assetMin || assetAmt <= 0) break;
+      if (assetAmt < assetMin || assetAmt <= 0 || spend < minUsd) break; // nothing more spendable: done
       const g = await placeAndWait(pair.assetUsdtSymbol, "buy", Number(fmt(assetAmt)), buyAssetPx);
       usdtPool -= g * buyAssetPx;
-      remainingUsd -= g * assetUsdtPrice;
-      totalBtcMoved += (g * assetUsdtPrice) / btcUsdtPrice;
+      // Progress is measured at what it actually cost (limit price), so the
+      // loop ends when the money is spent, not 0.5% short of it.
+      remainingUsd -= g * buyAssetPx;
+      totalBtcMoved += (g * buyAssetPx) / btcUsdtPrice;
       if (g < assetAmt * 0.999 || partial) break;
     } else {
       const sellAmt = c / assetUsdtPrice;
@@ -246,7 +335,7 @@ export async function executeRotation(params: {
           destinationRoutedBtc += toDestUsd / btcUsdtPrice; // USDT left in wallet for the destination's own entry
         } else {
           const r = await convertUsdt(destination.pair.assetUsdtSymbol, destBuyPx, toDestUsd, destAssetMin);
-          destinationRoutedBtc += (r.spentUsd) / btcUsdtPrice;
+          destinationRoutedBtc += r.spentUsd / btcUsdtPrice;
           destUsdLeft += toDestUsd - r.spentUsd; // anything unspent falls back to BTC below
           if (!r.ok) converted = false;
         }
@@ -258,6 +347,13 @@ export async function executeRotation(params: {
       }
       if (!converted || f < sellAmt * 0.999) break; // USDT stays idle; retried next tick
     }
+  }
+  } catch (err) {
+    // Never throw away bookkeeping for orders that already filled: log, keep
+    // what moved, and let the next tick pick up the remainder.
+    console.error(
+      `[${pair.key}] rotation interrupted by an error after moving ${totalBtcMoved.toFixed(8)} BTC-equiv; remainder retried next tick: ${err instanceof Error ? err.message : String(err)}`
+    );
   }
 
   // Proceeds routed to a destination asset (or held as USDT for it) count as moved capital too.
