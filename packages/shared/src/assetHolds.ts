@@ -10,8 +10,15 @@ export interface AssetHold {
   entryPrice?: number; // asset-per-BTC (internal convention)
   exitAt?: number;
   exitPrice?: number;
+  /** Real average-fill prices (same convention); absent for trades before order-level tracking. */
+  actualEntryPrice?: number;
+  actualExitPrice?: number;
   size?: number; // BTC capital at entry
+  /** Headline PnL: from actual fills when both legs have them, else from signal prices. */
   pnl?: number;
+  /** PnL computed purely from signal (bar close) prices, for comparison. */
+  signalPnl?: number;
+  pnlBasis?: "actual" | "signal";
 }
 
 /**
@@ -34,13 +41,25 @@ export function deriveAssetHolds(trades: Trade[]): AssetHold[] {
     const prevClosedAt = prev && prev.closedAt !== undefined ? prev.closedAt : undefined;
     const entryPrice = prev ? prev.exitPrice : undefined;
     const exitPrice = next.entryPrice;
+    const actualEntryPrice = prev ? prev.actualExitPrice : undefined;
+    const actualExitPrice = next.actualEntryPrice;
     let pnl: number | undefined;
+    let signalPnl: number | undefined;
     let size: number | undefined;
+    let pnlBasis: "actual" | "signal" | undefined;
     if (entryPrice && exitPrice && entryPrice > 0 && exitPrice > 0) {
       // asset-per-BTC: bought at r_in, sold at r_out => BTC out = in * r_in / r_out
       const growth = entryPrice / exitPrice;
       size = next.btcCapitalAtOpen / growth;
-      pnl = next.btcCapitalAtOpen - size;
+      signalPnl = next.btcCapitalAtOpen - size;
+      pnl = signalPnl;
+      pnlBasis = "signal";
+    }
+    if (actualEntryPrice && actualExitPrice && actualEntryPrice > 0 && actualExitPrice > 0) {
+      const aSize = next.btcCapitalAtOpen / (actualEntryPrice / actualExitPrice);
+      size = aSize;
+      pnl = next.btcCapitalAtOpen - aSize;
+      pnlBasis = "actual";
     }
     holds.push({
       id: next.id,
@@ -48,8 +67,12 @@ export function deriveAssetHolds(trades: Trade[]): AssetHold[] {
       ...(entryPrice !== undefined ? { entryPrice } : {}),
       exitAt: next.openedAt,
       ...(exitPrice !== undefined ? { exitPrice } : {}),
+      ...(actualEntryPrice !== undefined ? { actualEntryPrice } : {}),
+      ...(actualExitPrice !== undefined ? { actualExitPrice } : {}),
       ...(size !== undefined ? { size } : {}),
       ...(pnl !== undefined ? { pnl } : {}),
+      ...(signalPnl !== undefined ? { signalPnl } : {}),
+      ...(pnlBasis !== undefined ? { pnlBasis } : {}),
     });
   }
   const last = seq[seq.length - 1];
@@ -58,6 +81,7 @@ export function deriveAssetHolds(trades: Trade[]): AssetHold[] {
       id: `${last.id}-open`,
       entryAt: last.closedAt,
       ...(last.exitPrice !== undefined ? { entryPrice: last.exitPrice } : {}),
+      ...(last.actualExitPrice !== undefined ? { actualEntryPrice: last.actualExitPrice } : {}),
     });
   }
   return holds;

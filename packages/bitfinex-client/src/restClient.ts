@@ -282,7 +282,10 @@ export class BitfinexRestClient {
    * orders first, then order history. Row layout (both endpoints):
    * [ID, GID, CID, SYMBOL, MTS_CREATE, MTS_UPDATE, AMOUNT(remaining), AMOUNT_ORIG, ...]
    */
-  async getOrderFill(symbol: string, orderId: string): Promise<{ active: boolean; filled: number; original: number }> {
+  async getOrderFill(
+    symbol: string,
+    orderId: string
+  ): Promise<{ active: boolean; filled: number; original: number; avgPrice?: number }> {
     const idNum = Number(orderId);
     const find = (rows: unknown): unknown[] | undefined =>
       Array.isArray(rows) ? (rows as unknown[][]).find((r) => Array.isArray(r) && Number(r[0]) === idNum) : undefined;
@@ -290,13 +293,13 @@ export class BitfinexRestClient {
     if (activeRow) {
       const rem = Math.abs(Number(activeRow[6]));
       const orig = Math.abs(Number(activeRow[7]));
-      return { active: true, filled: Math.max(0, orig - rem), original: orig };
+      return { active: true, filled: Math.max(0, orig - rem), original: orig, avgPrice: Number(activeRow[17]) || 0 };
     }
     const histRow = find(await this.authPost(`v2/auth/r/orders/${symbol}/hist`, { id: [idNum] }));
     if (histRow) {
       const rem = Math.abs(Number(histRow[6]));
       const orig = Math.abs(Number(histRow[7]));
-      return { active: false, filled: Math.max(0, orig - rem), original: orig };
+      return { active: false, filled: Math.max(0, orig - rem), original: orig, avgPrice: Number(histRow[17]) || 0 };
     }
     // Neither list has it yet (propagation lag) - report unknown as still active, nothing filled.
     return { active: true, filled: 0, original: 0 };

@@ -139,4 +139,35 @@ describe("idle top-up routing under a non-50/50, non-100/0 allocation override",
     expect(topup!.requestedBtc).toBeGreaterThan(0);
     expect(topup!.requestedBtc).toBeLessThan(20);
   });
+
+  /**
+   * Anti-chase gate (Oct 2026): new idle BTC only joins an existing position
+   * while price is within the strategy's max entry distance of the baseline.
+   */
+  it("holds idle BTC back when price is more than the max entry distance above the baseline", async () => {
+    // Enter early (price within 4% of baseline), then run well above it.
+    const farAbove = [...new Array(60).fill(100), ...linearRamp(100, 102, 20), ...linearRamp(102, 109, 20)];
+    const client: BitfinexRestClient = {
+      getCandles: async (symbol: string) =>
+        symbol === XAUT_SYMBOL || symbol === XMR_SYMBOL ? makeCandles(farAbove) : makeCandles(new Array(100).fill(100)),
+      getBookDepth: async (symbol: string) => ({ timestamp: 0, symbol, bidDepth: 50, askDepth: 50 }),
+      submitOrder: async () => ({ submitted: false, dryRun: true }),
+      getMinOrderSize: async () => 0,
+      getWallets: async () => [
+        { walletType: "exchange", currency: "BTC", balance: 1, availableBalance: 1 },
+        { walletType: "exchange", currency: "XAUT", balance: 2, availableBalance: 2 },
+        { walletType: "exchange", currency: "XMR", balance: 6, availableBalance: 6 },
+      ],
+    } as unknown as BitfinexRestClient;
+
+    repo.setAllocationOverride(true, 0.45);
+    repo.setAllocationFraction("xaut", 0.45);
+    repo.setAllocationFraction("xmr", 0.55);
+
+    const results = await runControlLoopIteration({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    const xaut = results.find((r) => r.pairKey === "xaut")!;
+    expect(xaut.currentPosition).toBe("flat");
+    expect(repo.getRecentExecutions("xaut", 10).find((e) => e.kind === "topup")).toBeUndefined();
+    expect(xaut.rotated).toBe(false);
+  });
 });

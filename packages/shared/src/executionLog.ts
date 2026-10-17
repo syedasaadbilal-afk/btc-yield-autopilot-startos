@@ -22,4 +22,14 @@ export interface ExecutionLogEntry {
   status: "executed" | "blocked";
   /** Comma-joined route per tranche/leg, e.g. "direct,direct,usdt" - quick visibility without a separate table. */
   routes: string;
+  /** Asset-leg orders that filled (undefined on rows logged before order summaries existed). */
+  orderCount?: number;
+  /** Asset units bought (entry) or sold (exit) across those orders. */
+  assetAmount?: number;
+  /** USDT value of those orders. */
+  quoteUsd?: number;
+  /** True average fill price (USDT per asset unit). */
+  avgPrice?: number;
+  /** JSON array of every filled order: {symbol, action, base, price}. */
+  orders?: string;
 }

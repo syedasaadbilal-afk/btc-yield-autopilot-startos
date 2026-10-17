@@ -52,3 +52,19 @@ describe("deriveAssetHolds", () => {
     ).toEqual([]);
   });
 });
+
+describe("deriveAssetHolds actual vs signal prices", () => {
+  it("uses actual fill prices for headline PnL and keeps signal PnL for comparison", () => {
+    const mk = (o: Partial<import("../src/trade.js").Trade>) =>
+      ({ runMode: "LIVE", targetPosition: "long", btcCapitalAtOpen: 1, riskFractionOfCapital: 0.01, stopLossRatio: 0, firstTargetRatio: 0, status: "closed_win", trancheExecutionPlanIds: [], ...o }) as import("../src/trade.js").Trade;
+    const holds = deriveAssetHolds([
+      mk({ id: "a", openedAt: 1, closedAt: 10, entryPrice: 100, exitPrice: 100, actualEntryPrice: 100, actualExitPrice: 101 }),
+      mk({ id: "b", openedAt: 20, closedAt: 30, entryPrice: 90, exitPrice: 90, actualEntryPrice: 91, actualExitPrice: 90 }),
+    ]);
+    const h = holds.find((x) => x.id === "b")!;
+    expect(h.pnlBasis).toBe("actual");
+    expect(h.signalPnl).toBeCloseTo(1 - 1 / (101 / 91 > 0 ? 100 / 90 : 1), 6);
+    expect(h.pnl).toBeCloseTo(1 - 1 / (101 / 91), 6);
+    expect(h.pnl).not.toBeCloseTo(h.signalPnl!, 4);
+  });
+});

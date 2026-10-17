@@ -13,6 +13,18 @@ const STATUS_STYLES: Record<ExecutionLogEntry["status"], string> = {
   blocked: "bg-amber-950 text-amber-300 border border-amber-800",
 };
 
+const fmtNum = (n: number, d: number) => n.toLocaleString(undefined, { maximumFractionDigits: d });
+
+/** "10 orders × ~$2,000 bought 125 XMR @ avg $320.5" - or null for rows without fill data. */
+function orderSummary(e: ExecutionLogEntry): string | null {
+  if (!e.orderCount || !e.assetAmount || !e.quoteUsd || !e.avgPrice) return null;
+  const asset = e.pairKey.split("-").pop()?.toUpperCase() ?? "asset";
+  const verb = e.side === "sell_btc_for_xaut" ? "bought" : "sold";
+  const per = e.quoteUsd / e.orderCount;
+  const priceDigits = e.avgPrice >= 100 ? 2 : e.avgPrice >= 1 ? 3 : 6;
+  return `${e.orderCount} × ~$${fmtNum(per, 0)} orders ${verb} ${fmtNum(e.assetAmount, 4)} ${asset} (avg $${fmtNum(e.avgPrice, priceDigits)}, total $${fmtNum(e.quoteUsd, 0)})`;
+}
+
 /**
  * Every real execution attempt for a pair - flip entry/exit, cross-pair
  * resizes, idle top-ups - distinct from the Status tab's PositionsTable,
@@ -33,7 +45,7 @@ export function ExecutionsTable({ executions, unit }: { executions: ExecutionLog
           <th className="py-1.5 pr-3">Side</th>
           <th className="py-1.5 pr-3">Requested</th>
           <th className="py-1.5 pr-3">Moved</th>
-          <th className="py-1.5 pr-3">Routes</th>
+          <th className="py-1.5 pr-3">Orders</th>
           <th className="py-1.5 pr-3">Status</th>
         </tr>
       </thead>
@@ -45,7 +57,7 @@ export function ExecutionsTable({ executions, unit }: { executions: ExecutionLog
             <td className="py-1.5 pr-3 text-slate-400">{e.side === "sell_btc_for_xaut" ? "BTC → asset" : "asset → BTC"}</td>
             <td className="py-1.5 pr-3">{formatBtcAmount(e.requestedBtc, unit)}</td>
             <td className="py-1.5 pr-3">{formatBtcAmount(e.movedBtc, unit)}</td>
-            <td className="py-1.5 pr-3 text-slate-500">{e.routes || "-"}</td>
+            <td className="py-1.5 pr-3 text-slate-500">{orderSummary(e) ?? (e.routes || "-")}</td>
             <td className="py-1.5 pr-3">
               <span className={`px-1.5 py-0.5 rounded text-[11px] ${STATUS_STYLES[e.status]}`}>{e.status}</span>
             </td>

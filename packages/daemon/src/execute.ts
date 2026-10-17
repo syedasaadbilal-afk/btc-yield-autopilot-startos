@@ -34,6 +34,36 @@ export interface ExecuteRotationResult {
   routeDecisions: RouteDecision[];
   /** Exit only: BTC-equivalent of proceeds routed toward the destination asset (bought, or left as USDT for its entry). */
   destinationRoutedBtc?: number;
+  /** Every order that filled (even partially), in placement order, with its real average fill price. */
+  fills?: OrderFill[];
+  /** Reference BTC/USDT price used for this run (fallback when no BTC-leg order filled). */
+  btcUsdtPrice?: number;
+}
+
+export interface OrderFill {
+  symbol: string;
+  action: "buy" | "sell";
+  /** Base-currency amount filled. */
+  base: number;
+  /** Average fill price in the quote currency (USDT). */
+  price: number;
+}
+
+export interface FillSummary {
+  /** Orders that touched the pair's asset (the leg the user cares about). */
+  orderCount: number;
+  assetAmount: number;
+  quoteUsd: number;
+  avgPrice: number;
+}
+
+/** Summarises the asset-leg fills (asset/USDT orders) for the Timeline. */
+export function summarizeFills(fills: OrderFill[] | undefined, assetSymbol: string): FillSummary | null {
+  const legs = (fills ?? []).filter((f) => f.symbol === assetSymbol && f.base > 0);
+  if (legs.length === 0) return null;
+  const assetAmount = legs.reduce((s, f) => s + f.base, 0);
+  const quoteUsd = legs.reduce((s, f) => s + f.base * f.price, 0);
+  return { orderCount: legs.length, assetAmount, quoteUsd, avgPrice: assetAmount > 0 ? quoteUsd / assetAmount : 0 };
 }
 
 
@@ -53,21 +83,22 @@ export async function placeLimitAndWait(
   action: "buy" | "sell",
   baseAmount: number,
   limitPx: number
-): Promise<{ filled: number; dry: boolean }> {
+): Promise<{ filled: number; dry: boolean; avgPrice: number }> {
   const result = await client.submitOrder({
     symbol,
     amount: action === "buy" ? baseAmount : -baseAmount,
     price: limitPx >= 1 ? limitPx.toFixed(2) : limitPx.toFixed(8),
     type: "EXCHANGE LIMIT",
   });
-  if (result.dryRun) return { filled: baseAmount, dry: true };
+  if (result.dryRun) return { filled: baseAmount, dry: true, avgPrice: limitPx };
   const id = result.exchangeOrderId;
   if (!id) {
     console.error(`[${opts.pairKey}] ${symbol} order submitted but no order id returned - stopping for safety.`);
-    return { filled: 0, dry: false };
+    return { filled: 0, dry: false, avgPrice: 0 };
   }
   const deadline = Date.now() + opts.fillTimeoutMs;
-  let state = { active: true, filled: 0, original: 0 };
+  let state: { active: boolean; filled: number; original: number; avgPrice?: number } = { active: true, filled: 0, original: 0 };
+  const px = () => (state.avgPrice && state.avgPrice > 0 ? state.avgPrice : limitPx);
   for (;;) {
     await sleepMs(opts.pollIntervalMs);
     try {
@@ -75,7 +106,7 @@ export async function placeLimitAndWait(
     } catch (err) {
       console.warn(`[${opts.pairKey}] order status read failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-    if (!state.active) return { filled: state.filled, dry: false };
+    if (!state.active) return { filled: state.filled, dry: false, avgPrice: px() };
     if (Date.now() >= deadline) break;
   }
   // Timed out: cancel the resting remainder, keep whatever filled.
@@ -87,7 +118,7 @@ export async function placeLimitAndWait(
     console.warn(`[${opts.pairKey}] cancel/final-fill read failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   console.warn(`[${opts.pairKey}] ${symbol} order not fully filled in time: ${state.filled.toFixed(8)} filled, remainder cancelled.`);
-  return { filled: state.filled, dry: false };
+  return { filled: state.filled, dry: false, avgPrice: px() };
 }
 
 /**
@@ -234,11 +265,13 @@ export async function executeRotation(params: {
   const buyAssetPx = px(assetUsdtPrice, "buy");
   const sellAssetPx = px(assetUsdtPrice, "sell");
 
+  const fills: OrderFill[] = [];
   let isLive = false; // becomes true once a real (non-dry-run) order has been placed
   const orderOpts = { pairKey: pair.key, fillTimeoutMs, pollIntervalMs };
   const placeAndWait = async (symbol: string, action: "buy" | "sell", baseAmount: number, limitPx: number): Promise<number> => {
     const r = await placeLimitAndWait(client, orderOpts, symbol, action, baseAmount, limitPx);
     if (!r.dry) isLive = true;
+    if (r.filled > 0) fills.push({ symbol, action, base: r.filled, price: r.avgPrice });
     return r.filled;
   };
 
@@ -357,5 +390,25 @@ export async function executeRotation(params: {
   }
 
   // Proceeds routed to a destination asset (or held as USDT for it) count as moved capital too.
-  return { plans: [], totalBtcMoved: totalBtcMoved + destinationRoutedBtc, routeDecisions, destinationRoutedBtc };
+  return { plans: [], totalBtcMoved: totalBtcMoved + destinationRoutedBtc, routeDecisions, destinationRoutedBtc, fills, btcUsdtPrice };
+}
+
+/**
+ * Real asset-per-BTC price of a rotation, from actual average fills: asset/USDT
+ * weighted average over BTC/USDT weighted average (BTC-leg fills when any
+ * filled, else the reference BTC/USDT price). Same convention as trade
+ * entry/exit prices. Undefined when no asset-leg order filled.
+ */
+export function actualRatioFromFills(
+  fills: OrderFill[] | undefined,
+  assetSymbol: string,
+  btcSymbol: string,
+  btcRefPrice: number | undefined
+): number | undefined {
+  const a = summarizeFills(fills, assetSymbol);
+  if (!a || a.avgPrice <= 0) return undefined;
+  const b = summarizeFills(fills, btcSymbol);
+  const btcPx = b && b.avgPrice > 0 ? b.avgPrice : btcRefPrice;
+  if (!btcPx || btcPx <= 0) return undefined;
+  return btcPx / a.avgPrice;
 }

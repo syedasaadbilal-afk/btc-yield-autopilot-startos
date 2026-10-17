@@ -117,8 +117,8 @@ export class Repo {
       .prepare(
         `INSERT INTO trades (id, run_mode, pair_key, opened_at, closed_at, target_position, btc_capital_at_open,
            risk_fraction_of_capital, stop_loss_ratio, first_target_ratio, status, realized_btc_pnl, notes,
-           entry_price, exit_price)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           entry_price, exit_price, actual_entry_price, actual_exit_price)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         trade.id,
@@ -135,7 +135,9 @@ export class Repo {
         trade.realizedBtcPnl ?? null,
         trade.notes ?? null,
         trade.entryPrice ?? null,
-        trade.exitPrice ?? null
+        trade.exitPrice ?? null,
+        trade.actualEntryPrice ?? null,
+        trade.actualExitPrice ?? null
       );
   }
 
@@ -144,11 +146,14 @@ export class Repo {
     status: "closed_win" | "closed_loss" | "cancelled",
     realizedBtcPnl: number,
     exitPrice?: number,
-    closedAt?: number
+    closedAt?: number,
+    actualExitPrice?: number
   ): void {
     this.db
-      .prepare("UPDATE trades SET status = ?, closed_at = ?, realized_btc_pnl = ?, exit_price = ? WHERE id = ?")
-      .run(status, closedAt ?? Date.now(), realizedBtcPnl, exitPrice ?? null, id);
+      .prepare(
+        "UPDATE trades SET status = ?, closed_at = ?, realized_btc_pnl = ?, exit_price = ?, actual_exit_price = ? WHERE id = ?"
+      )
+      .run(status, closedAt ?? Date.now(), realizedBtcPnl, exitPrice ?? null, actualExitPrice ?? null, id);
   }
 
   getOpenTrade(pairKey: string = DEFAULT_PAIR_KEY): Trade | undefined {
@@ -232,8 +237,8 @@ export class Repo {
   insertExecutionLog(entry: ExecutionLogEntry): void {
     this.db
       .prepare(
-        `INSERT INTO execution_log (id, pair_key, timestamp, kind, side, requested_btc, moved_btc, status, routes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO execution_log (id, pair_key, timestamp, kind, side, requested_btc, moved_btc, status, routes, order_count, asset_amount, quote_usd, avg_price, orders)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         entry.id,
@@ -244,7 +249,12 @@ export class Repo {
         entry.requestedBtc,
         entry.movedBtc,
         entry.status,
-        entry.routes
+        entry.routes,
+        entry.orderCount ?? null,
+        entry.assetAmount ?? null,
+        entry.quoteUsd ?? null,
+        entry.avgPrice ?? null,
+        entry.orders ?? null
       );
   }
 
@@ -442,6 +452,8 @@ function rowToTrade(row: unknown): Trade {
   const pairKey = r.pair_key as string | null;
   const entryPrice = r.entry_price as number | null;
   const exitPrice = r.exit_price as number | null;
+  const actualEntryPrice = r.actual_entry_price as number | null;
+  const actualExitPrice = r.actual_exit_price as number | null;
 
   return {
     id: r.id as string,
@@ -462,6 +474,8 @@ function rowToTrade(row: unknown): Trade {
     ...(pairKey !== null ? { pairKey } : {}),
     ...(entryPrice !== null ? { entryPrice } : {}),
     ...(exitPrice !== null ? { exitPrice } : {}),
+    ...(actualEntryPrice != null ? { actualEntryPrice } : {}),
+    ...(actualExitPrice != null ? { actualExitPrice } : {}),
   };
 }
 
@@ -477,6 +491,11 @@ function rowToExecutionLogEntry(row: unknown): ExecutionLogEntry {
     movedBtc: r.moved_btc as number,
     status: r.status as ExecutionLogEntry["status"],
     routes: r.routes as string,
+    ...(r.order_count != null ? { orderCount: r.order_count as number } : {}),
+    ...(r.asset_amount != null ? { assetAmount: r.asset_amount as number } : {}),
+    ...(r.quote_usd != null ? { quoteUsd: r.quote_usd as number } : {}),
+    ...(r.avg_price != null ? { avgPrice: r.avg_price as number } : {}),
+    ...(r.orders != null ? { orders: r.orders as string } : {}),
   };
 }
 

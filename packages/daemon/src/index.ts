@@ -97,6 +97,21 @@ async function main() {
 
   await tick();
   setInterval(tick, TICK_MS);
+
+  // Extra decision tick just after each UTC daily-bar close (00:02), so a
+  // TradingView next-bar-open signal is acted on within minutes instead of
+  // waiting for the next 4-hourly tick. Overlap with the regular interval is
+  // harmless: tickInProgress serialises runs and decisions are idempotent.
+  const scheduleMidnightTick = () => {
+    const now = new Date();
+    const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 2, 0);
+    const at = next > now.getTime() + 1000 ? next : next + 24 * 3_600_000;
+    setTimeout(() => {
+      console.log("[autopilot] UTC daily-close tick");
+      void tick().finally(scheduleMidnightTick);
+    }, at - now.getTime());
+  };
+  scheduleMidnightTick();
 }
 
 main().catch((err) => {

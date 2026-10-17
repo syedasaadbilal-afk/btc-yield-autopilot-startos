@@ -148,6 +148,7 @@ export async function createServer(opts: CreateServerOptions) {
         reason: latestDecision?.reason ?? null,
         distFromBaseline: latestDecision?.distFromBaseline ?? null,
         btcEquivalentNav: latestNav?.btcEquivalentNav ?? null,
+        latestRatio: latestNav?.btcXautRatio ?? null,
         // Bug found live Aug 2026 (round 3): this used to be computed
         // dashboard-side from this pair's very first-ever NAV history point
         // (frozen forever, #95/#101) - which read as trading loss/gain

@@ -12,7 +12,20 @@ import {
 import type { BitfinexRestClient } from "@autopilot/bitfinex-client";
 import type { Repo } from "./db/repo.js";
 import { gate } from "./gate.js";
-import { executeRotation, sellHoldingForUsdt } from "./execute.js";
+import { actualRatioFromFills, executeRotation, sellHoldingForUsdt, summarizeFills, type OrderFill } from "./execute.js";
+
+/** Order-summary columns for an execution_log row (empty when no asset-leg order filled). */
+function fillFields(fills: OrderFill[] | undefined, assetSymbol: string) {
+  const s = summarizeFills(fills, assetSymbol);
+  if (!s) return {};
+  return {
+    orderCount: s.orderCount,
+    assetAmount: s.assetAmount,
+    quoteUsd: s.quoteUsd,
+    avgPrice: s.avgPrice,
+    orders: JSON.stringify(fills),
+  };
+}
 
 export interface LoopDeps {
   client: BitfinexRestClient;
@@ -528,7 +541,7 @@ async function gateAndExecute(
     }
 
     const executeResult = flipDeferred
-      ? { plans: [], totalBtcMoved: 0, routeDecisions: [] }
+      ? { plans: [], totalBtcMoved: 0, routeDecisions: [], fills: [] as OrderFill[], destinationRoutedBtc: 0 }
       : await executeRotation({
           client,
           side,
@@ -556,6 +569,10 @@ async function gateAndExecute(
           movedBtc: executeResult.destinationRoutedBtc!,
           status: "executed",
           routes: "usdt",
+          ...fillFields(
+            executeResult.fills?.filter((f) => f.symbol === exitDestination.pair.assetUsdtSymbol),
+            exitDestination.pair.assetUsdtSymbol
+          ),
         });
       }
     }
@@ -584,6 +601,7 @@ async function gateAndExecute(
       movedBtc: executeResult.totalBtcMoved,
       status: executeResult.totalBtcMoved > 0 ? "executed" : "blocked",
       routes: executeResult.routeDecisions.map((rd) => rd.route).join(","),
+      ...fillFields(executeResult.fills, pair.assetUsdtSymbol),
     });
 
     // Bug found live Aug 2026 (same class as the #100 resize fix): this used
@@ -606,6 +624,12 @@ async function gateAndExecute(
       executedBtcCapital = btcCapital;
       executedDirection = decision.target === "long" ? "into_btc" : "into_asset";
 
+      const actualRatio = actualRatioFromFills(
+        executeResult.fills,
+        pair.assetUsdtSymbol,
+        pair.btcUsdtSymbol,
+        executeResult.btcUsdtPrice
+      );
       if (decision.target === "long") {
         const entryPrice = accountingCandles[accountingCandles.length - 1]!.close;
         const stopAndTarget = computeStopAndTarget(accountingCandles, entryPrice, "long", config);
@@ -622,6 +646,7 @@ async function gateAndExecute(
           firstTargetRatio: stopAndTarget.firstTargetPrice,
           status: "open",
           trancheExecutionPlanIds: [],
+          ...(actualRatio !== undefined ? { actualEntryPrice: actualRatio } : {}),
         });
       } else if (openTrade) {
         // Realized PnL for a "long" (BTC-holding) trade is the opportunity-cost
@@ -637,15 +662,19 @@ async function gateAndExecute(
         // exitPrice). A rising ratio (BTC buys more asset over time) while long
         // BTC means the bet paid off -> positive PnL, confirmed by hand.
         const exitPrice = accountingCandles[accountingCandles.length - 1]?.close;
+        // Prefer real fill prices when both legs have them; otherwise signal prices.
+        const useActual = actualRatio !== undefined && openTrade.actualEntryPrice !== undefined;
+        const exitBasis = useActual ? actualRatio : exitPrice;
+        const entryBasis = useActual ? openTrade.actualEntryPrice : openTrade.entryPrice;
         const pnl =
-          exitPrice !== undefined && exitPrice > 0 && openTrade.entryPrice !== undefined
-            ? openTrade.btcCapitalAtOpen * (1 - openTrade.entryPrice / exitPrice)
+          exitBasis !== undefined && exitBasis > 0 && entryBasis !== undefined
+            ? openTrade.btcCapitalAtOpen * (1 - entryBasis / exitBasis)
             : 0;
         // Stamp closed_at with this iteration's `now` (not a fresh Date.now())
         // so it stays consistent with the cooldown-gate clock elsewhere in
         // this same tick, and so tests can drive a deterministic clock end
         // to end via deps.now instead of racing the real wall clock.
-        repo.closeTrade(openTrade.id, pnl >= 0 ? "closed_win" : "closed_loss", pnl, exitPrice, now);
+        repo.closeTrade(openTrade.id, pnl >= 0 ? "closed_win" : "closed_loss", pnl, exitPrice, now, actualRatio);
       }
       repo.setAllocationFraction(pair.key, targetFraction);
     }
@@ -722,6 +751,7 @@ async function gateAndExecute(
             movedBtc: executeResult.totalBtcMoved,
             status: executeResult.totalBtcMoved > 0 ? "executed" : "blocked",
             routes: executeResult.routeDecisions.map((rd) => rd.route).join(","),
+            ...fillFields(executeResult.fills, pair.assetUsdtSymbol),
           });
           if (executeResult.totalBtcMoved <= 0) {
             resizeBlocked = true;
@@ -749,6 +779,14 @@ async function gateAndExecute(
         console.log(
           `[${pair.key}] skipping idle-capital top-up of ${idleTopUpBtc.toFixed(8)} BTC: run mode is PAUSED (treated the same as a fresh entry).`
         );
+      } else if (!(today.distFromBaseline <= config.larsson.entryMaxDistFraction)) {
+        // Same anti-chase rule the strategy applies to fresh entries: new money
+        // only joins an existing position while price is within the max entry
+        // distance of the baseline. Otherwise it waits in BTC (and is re-checked
+        // every tick) instead of buying far from the strategy's price.
+        console.log(
+          `[${pair.key}] idle top-up of ${idleTopUpBtc.toFixed(8)} BTC held back: price is ${(today.distFromBaseline * 100).toFixed(1)}% above baseline (> ${(config.larsson.entryMaxDistFraction * 100).toFixed(1)}% max entry distance). Waiting in BTC.`
+        );
       } else if ((await applyDeployCap(deps, pair, idleTopUpBtc, now, { dryCheck: true })) <= totalPortfolioBtc * 0.001) {
         console.log(`[${pair.key}] idle top-up deferred: daily deployment cap exhausted.`);
       } else {
@@ -770,17 +808,22 @@ async function gateAndExecute(
             `[${pair.key}] top-up tranche ${rd.trancheIndex} routed via "${rd.route}" (direct ${rd.directSlippageBtc.toFixed(6)} BTC vs usdt ${rd.usdtSlippageBtc.toFixed(6)} BTC estimated slippage)`
           );
         }
-        repo.insertExecutionLog({
-          id: `${pair.key}-${now}-topup`,
-          pairKey: pair.key,
-          timestamp: now,
-          kind: "topup",
-          side: "sell_btc_for_xaut",
-          requestedBtc: topUpBtc,
-          movedBtc: executeResult.totalBtcMoved,
-          status: executeResult.totalBtcMoved > 0 ? "executed" : "blocked",
-          routes: executeResult.routeDecisions.map((rd) => rd.route).join(","),
-        });
+        // Dust top-ups that can't clear the exchange minimum are retried every
+        // tick; logging each one just spams the Timeline with "blocked" rows.
+        if (executeResult.totalBtcMoved > 0) {
+          repo.insertExecutionLog({
+            id: `${pair.key}-${now}-topup`,
+            pairKey: pair.key,
+            timestamp: now,
+            kind: "topup",
+            side: "sell_btc_for_xaut",
+            requestedBtc: topUpBtc,
+            movedBtc: executeResult.totalBtcMoved,
+            status: "executed",
+            routes: executeResult.routeDecisions.map((rd) => rd.route).join(","),
+            ...fillFields(executeResult.fills, pair.assetUsdtSymbol),
+          });
+        }
         rotated = true;
         executedBtcCapital = topUpBtc;
         executedDirection = "into_asset";

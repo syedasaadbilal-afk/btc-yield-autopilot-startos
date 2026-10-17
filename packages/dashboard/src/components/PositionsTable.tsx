@@ -54,7 +54,36 @@ function formatPrice(price: number | undefined): string {
  * at insert time) from this performance table entirely, regardless of its
  * closed status - it never represents a real trading decision.
  */
-export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: DisplayUnit }) {
+/** Actual fill price on top, signal (bar close) price underneath; either may be missing on older rows. */
+function PriceCell({ actual, signal }: { actual: number | undefined; signal: number | undefined }) {
+  if (actual === undefined && signal === undefined) return <>-</>;
+  if (actual === undefined) return <>{formatPrice(signal)}</>;
+  return (
+    <>
+      {formatPrice(actual)}
+      <div className="text-[10px] text-slate-500">signal {formatPrice(signal)}</div>
+    </>
+  );
+}
+
+/** Return of the open asset hold so far: asset-per-BTC entry/current - 1 (positive = asset gained vs BTC). */
+function unrealizedPct(entry: number | undefined, current: number | null | undefined): number | undefined {
+  if (!entry || !current || entry <= 0 || current <= 0) return undefined;
+  return (entry / current - 1) * 100;
+}
+
+const fmtPct = (p: number) => `${p >= 0 ? "+" : ""}${p.toFixed(2)}%`;
+
+export function PositionsTable({
+  trades,
+  unit,
+  currentRatio,
+}: {
+  trades: Trade[];
+  unit: DisplayUnit;
+  /** Latest asset-per-BTC ratio, for the open trade's unrealized return. */
+  currentRatio?: number | null;
+}) {
   const holds = deriveAssetHolds(trades);
   if (holds.length === 0) {
     return <div className="text-sm text-slate-500 py-4">No trades yet.</div>;
@@ -97,6 +126,11 @@ export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: Displa
           {ordered.map((t, i) => {
             const tradeNumber = ordered.length - i;
             const pnlColor = t.pnl === undefined ? "" : t.pnl >= 0 ? "text-emerald-400" : "text-red-400";
+            const isOpen = t.exitAt === undefined && t.entryAt !== undefined;
+            const uActual = isOpen ? unrealizedPct(t.actualEntryPrice, currentRatio) : undefined;
+            const uSignal = isOpen ? unrealizedPct(t.entryPrice, currentRatio) : undefined;
+            const u = uActual ?? uSignal;
+            const uColor = u === undefined ? "" : u >= 0 ? "text-emerald-400" : "text-red-400";
             const sizeCell = t.size !== undefined ? formatBtcAmount(t.size, unit) : "-";
 
             return (
@@ -112,13 +146,36 @@ export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: Displa
                     <span className="text-slate-500 mr-1">Exit</span>
                     {t.exitAt !== undefined ? new Date(t.exitAt).toLocaleDateString() : "Open"}
                   </td>
-                  <td className="py-1.5 pr-3">{formatPrice(t.exitPrice)}</td>
+                  <td className="py-1.5 pr-3">
+                    {isOpen && currentRatio ? (
+                      <span className="text-slate-500">now {formatPrice(currentRatio)}</span>
+                    ) : (
+                      <PriceCell actual={t.actualExitPrice} signal={t.exitPrice} />
+                    )}
+                  </td>
                   <td className="py-1.5 pr-3">{sizeCell}</td>
                   <td rowSpan={2} className={`py-1.5 pr-3 align-top ${pnlColor}`}>
                     {t.pnl !== undefined ? formatBtcAmount(t.pnl, unit, { signed: true }) : "-"}
+                    {t.pnl !== undefined && t.pnlBasis === "actual" && t.signalPnl !== undefined && (
+                      <div className="text-[10px] text-slate-500">signal {formatBtcAmount(t.signalPnl, unit, { signed: true })}</div>
+                    )}
+                    {t.pnl !== undefined && t.pnlBasis === "signal" && (
+                      <div className="text-[10px] text-slate-500">signal prices only</div>
+                    )}
                   </td>
-                  <td rowSpan={2} className={`py-1.5 pr-3 align-top ${pnlColor}`}>
-                    {formatReturn(t.pnl, t.size ?? 0)}
+                  <td rowSpan={2} className={`py-1.5 pr-3 align-top ${t.pnl !== undefined ? pnlColor : uColor}`}>
+                    {t.pnl !== undefined ? (
+                      formatReturn(t.pnl, t.size ?? 0)
+                    ) : u !== undefined ? (
+                      <>
+                        {fmtPct(u)}
+                        <div className="text-[10px] text-slate-500">
+                          unrealized{uActual !== undefined && uSignal !== undefined ? ` (signal ${fmtPct(uSignal)})` : ""}
+                        </div>
+                      </>
+                    ) : (
+                      "-"
+                    )}
                   </td>
                 </tr>
                 <tr className="border-b border-slate-800">
@@ -126,7 +183,9 @@ export function PositionsTable({ trades, unit }: { trades: Trade[]; unit: Displa
                     <span className="text-slate-500 mr-1">Entry</span>
                     {t.entryAt !== undefined ? new Date(t.entryAt).toLocaleDateString() : "-"}
                   </td>
-                  <td className="py-1.5 pr-3">{formatPrice(t.entryPrice)}</td>
+                  <td className="py-1.5 pr-3">
+                    <PriceCell actual={t.actualEntryPrice} signal={t.entryPrice} />
+                  </td>
                   <td className="py-1.5 pr-3">{sizeCell}</td>
                 </tr>
               </Fragment>

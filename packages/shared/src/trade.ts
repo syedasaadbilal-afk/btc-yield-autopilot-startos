@@ -19,6 +19,9 @@ export interface Trade {
   /** Ratio price (asset priced in BTC) at trade open/close - task #86. */
   entryPrice?: number;
   exitPrice?: number;
+  /** Same convention, but from the REAL average fills (asset/USDT avg over BTC/USDT avg) instead of the signal bar close. Absent for rows before v0.1.7. */
+  actualEntryPrice?: number;
+  actualExitPrice?: number;
   status: "open" | "closed_win" | "closed_loss" | "cancelled";
   /** Net BTC change once fully closed and (if flat) rotated back to BTC-equivalent. */
   realizedBtcPnl?: number;

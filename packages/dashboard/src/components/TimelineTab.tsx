@@ -74,7 +74,7 @@ export function TimelineTab({ status, unit }: { status: StatusResponse | undefin
           Trades (TradingView style: entry into asset, exit back to BTC)
         </h3>
         <div className="overflow-x-auto">
-          <PositionsTable trades={trades} unit={unit} />
+          <PositionsTable trades={trades} unit={unit} currentRatio={status.pairs.find((p) => p.pairKey === pairKey)?.latestRatio ?? null} />
         </div>
       </div>
 
