@@ -305,6 +305,35 @@ export class BitfinexRestClient {
     return { active: true, filled: 0, original: 0 };
   }
 
+  /**
+   * Past orders for one symbol created in [startMs, endMs], oldest first. Used by
+   * the one-time backfill of per-order fill data for executions logged before
+   * order summaries existed. `filled` is original minus remaining; `side` is
+   * from the sign of the original amount.
+   */
+  async getOrderHistory(
+    symbol: string,
+    startMs: number,
+    endMs: number
+  ): Promise<Array<{ id: string; createdAt: number; side: "buy" | "sell"; filled: number; avgPrice: number }>> {
+    const rows = await this.authPost(`v2/auth/r/orders/${symbol}/hist`, { start: startMs, end: endMs, limit: 250 });
+    if (!Array.isArray(rows)) return [];
+    return (rows as unknown[][])
+      .filter((r) => Array.isArray(r))
+      .map((r) => {
+        const orig = Number(r[7]);
+        const rem = Number(r[6]);
+        return {
+          id: String(r[0]),
+          createdAt: Number(r[4]),
+          side: (orig >= 0 ? "buy" : "sell") as "buy" | "sell",
+          filled: Math.max(0, Math.abs(orig) - Math.abs(rem)),
+          avgPrice: Number(r[17]) || 0,
+        };
+      })
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
   async cancelOrder(orderId: string): Promise<void> {
     if (this.config.runMode === "DRY_RUN") return;
     await this.authPost("v2/auth/w/order/cancel", { id: Number(orderId) });

@@ -8,6 +8,7 @@ import { Repo } from "./db/repo.js";
 import { runControlLoopIteration, type PairLoopResult } from "./loop.js";
 import { createServer, type ServerState } from "./server.js";
 import { readBitfinexSecrets } from "./secrets.js";
+import { BACKFILL_NAME, backfillExecutionFills } from "./backfill.js";
 
 const TICK_MS = Number(process.env.AUTOPILOT_TICK_MS ?? 4 * 60 * 60 * 1000); // 4h default, daily-signal strategy
 const DB_PATH = process.env.AUTOPILOT_DB_PATH ?? "./autopilot.sqlite";
@@ -94,6 +95,26 @@ async function main() {
     staticDir: DASHBOARD_STATIC_DIR,
     dbPath: DB_PATH,
   });
+
+  // One-time: reconstruct order summaries + real fill prices for executions
+  // logged before v0.1.7 from Bitfinex order history (read-only). Marked done
+  // only on success, so a network failure retries on the next boot.
+  if (!repo.isBackfillDone(BACKFILL_NAME)) {
+    try {
+      const secrets = readBitfinexSecrets(DB_PATH);
+      const client = new BitfinexRestClient({
+        apiKey: secrets.apiKey,
+        apiSecret: secrets.apiSecret,
+        baseUrl: process.env.BFX_BASE_URL ?? "https://api.bitfinex.com",
+        runMode: repo.getRunMode(INITIAL_RUN_MODE),
+      });
+      const r = await backfillExecutionFills({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
+      repo.markBackfillDone(BACKFILL_NAME);
+      console.log(`[autopilot] backfill done: ${r.executionsUpdated} executions, ${r.tradesUpdated} trades updated.`);
+    } catch (err) {
+      console.warn("[autopilot] backfill skipped (will retry next start):", err instanceof Error ? err.message : err);
+    }
+  }
 
   await tick();
   setInterval(tick, TICK_MS);

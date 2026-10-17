@@ -171,6 +171,21 @@ export class Repo {
     return rows.map(rowToTrade);
   }
 
+  /** Attaches real-fill prices to a trade (backfill). Only the provided legs are written. */
+  setTradeActualPrices(id: string, prices: { entry?: number; exit?: number }): void {
+    if (prices.entry !== undefined) this.db.prepare("UPDATE trades SET actual_entry_price = ? WHERE id = ?").run(prices.entry, id);
+    if (prices.exit !== undefined) this.db.prepare("UPDATE trades SET actual_exit_price = ? WHERE id = ?").run(prices.exit, id);
+  }
+
+  /** One-time jobs are remembered in the same table migrations use (keys are prefixed, never .sql files). */
+  isBackfillDone(name: string): boolean {
+    return this.db.prepare("SELECT 1 AS x FROM _migrations WHERE filename = ?").get(`backfill:${name}`) !== undefined;
+  }
+
+  markBackfillDone(name: string): void {
+    this.db.prepare("INSERT OR IGNORE INTO _migrations (filename, applied_at) VALUES (?, ?)").run(`backfill:${name}`, Date.now());
+  }
+
   getLastStopOutAt(pairKey: string = DEFAULT_PAIR_KEY): number | undefined {
     const row = this.db
       .prepare(
@@ -270,6 +285,16 @@ export class Repo {
       )
       .get(sinceTs) as { total: number };
     return row.total;
+  }
+
+  /** Fills in the order summary of an already-logged execution (backfill). */
+  setExecutionFills(
+    id: string,
+    f: { orderCount: number; assetAmount: number; quoteUsd: number; avgPrice: number; orders: string }
+  ): void {
+    this.db
+      .prepare("UPDATE execution_log SET order_count = ?, asset_amount = ?, quote_usd = ?, avg_price = ?, orders = ? WHERE id = ?")
+      .run(f.orderCount, f.assetAmount, f.quoteUsd, f.avgPrice, f.orders, id);
   }
 
   /** Most recent execution attempts for this pair, newest first - powers the Timeline tab. */
