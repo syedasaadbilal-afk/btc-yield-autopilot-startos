@@ -95,6 +95,18 @@ export class BitfinexRestClient {
       .sort((a, b) => a.timestamp - b.timestamp);
   }
 
+  /** Candles in [startMs, endMs], oldest first (public). Used to price a historical fill in BTC at the minute it happened. */
+  async getCandlesBetween(symbol: string, timeframe: "1m" | "1h", startMs: number, endMs: number): Promise<Candle[]> {
+    await this.waitForToken();
+    const url = `${this.config.baseUrl}/v2/candles/trade:${timeframe}:${symbol}/hist?start=${Math.floor(startMs)}&end=${Math.floor(endMs)}&limit=10000&sort=1`;
+    const res = await this.fetchImpl(url);
+    if (!res.ok) throw new Error(`getCandlesBetween failed: ${res.status} ${await res.text()}`);
+    const rows = (await res.json()) as number[][];
+    return rows
+      .map((r) => ({ timestamp: r[0]!, open: r[1]!, close: r[2]!, high: r[3]!, low: r[4]!, volume: r[5]! }))
+      .sort((a, b) => a.timestamp - b.timestamp);
+  }
+
   async getBookDepth(symbol: string, precision = "P0"): Promise<OrderBookDepthSnapshot> {
     await this.waitForToken();
     const url = `${this.config.baseUrl}/v2/book/${symbol}/${precision}?len=25`;
@@ -306,32 +318,50 @@ export class BitfinexRestClient {
   }
 
   /**
-   * Past orders for one symbol created in [startMs, endMs], oldest first. Used by
-   * the one-time backfill of per-order fill data for executions logged before
-   * order summaries existed. `filled` is original minus remaining; `side` is
-   * from the sign of the original amount.
+   * Executed fills (not orders) for one symbol in [startMs, endMs], oldest first,
+   * aggregated per order: total base filled and volume-weighted average price.
+   * The trades history is kept far longer than order history, which makes it the
+   * right source for reconstructing old executions. Pages backwards when 2500
+   * rows come back.
    */
-  async getOrderHistory(
+  async getTradeFills(
     symbol: string,
     startMs: number,
     endMs: number
-  ): Promise<Array<{ id: string; createdAt: number; side: "buy" | "sell"; filled: number; avgPrice: number }>> {
-    const rows = await this.authPost(`v2/auth/r/orders/${symbol}/hist`, { start: startMs, end: endMs, limit: 250 });
-    if (!Array.isArray(rows)) return [];
-    return (rows as unknown[][])
-      .filter((r) => Array.isArray(r))
-      .map((r) => {
-        const orig = Number(r[7]);
-        const rem = Number(r[6]);
-        return {
-          id: String(r[0]),
-          createdAt: Number(r[4]),
-          side: (orig >= 0 ? "buy" : "sell") as "buy" | "sell",
-          filled: Math.max(0, Math.abs(orig) - Math.abs(rem)),
-          avgPrice: Number(r[17]) || 0,
-        };
-      })
-      .sort((a, b) => a.createdAt - b.createdAt);
+  ): Promise<Array<{ orderId: string; firstAt: number; side: "buy" | "sell"; filled: number; avgPrice: number }>> {
+    const byOrder = new Map<string, { firstAt: number; buy: boolean; base: number; quote: number }>();
+    let end = endMs;
+    for (let page = 0; page < 10; page++) {
+      const rows = await this.authPost(`v2/auth/r/trades/${symbol}/hist`, { start: startMs, end, limit: 2500, sort: -1 });
+      if (!Array.isArray(rows) || rows.length === 0) break;
+      let oldest = end;
+      for (const r of rows as unknown[][]) {
+        if (!Array.isArray(r)) continue;
+        // [ID, PAIR, MTS_CREATE, ORDER_ID, EXEC_AMOUNT, EXEC_PRICE, ...]
+        const mts = Number(r[2]);
+        const amt = Number(r[4]);
+        const px = Number(r[5]);
+        if (!(px > 0) || amt === 0) continue;
+        oldest = Math.min(oldest, mts);
+        const key = String(r[3]);
+        const cur = byOrder.get(key) ?? { firstAt: mts, buy: amt > 0, base: 0, quote: 0 };
+        cur.firstAt = Math.min(cur.firstAt, mts);
+        cur.base += Math.abs(amt);
+        cur.quote += Math.abs(amt) * px;
+        byOrder.set(key, cur);
+      }
+      if (rows.length < 2500) break;
+      end = oldest - 1;
+    }
+    return [...byOrder.entries()]
+      .map(([orderId, o]) => ({
+        orderId,
+        firstAt: o.firstAt,
+        side: (o.buy ? "buy" : "sell") as "buy" | "sell",
+        filled: o.base,
+        avgPrice: o.base > 0 ? o.quote / o.base : 0,
+      }))
+      .sort((x, y) => x.firstAt - y.firstAt);
   }
 
   async cancelOrder(orderId: string): Promise<void> {

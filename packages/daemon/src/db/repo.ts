@@ -252,8 +252,8 @@ export class Repo {
   insertExecutionLog(entry: ExecutionLogEntry): void {
     this.db
       .prepare(
-        `INSERT INTO execution_log (id, pair_key, timestamp, kind, side, requested_btc, moved_btc, status, routes, order_count, asset_amount, quote_usd, avg_price, orders)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO execution_log (id, pair_key, timestamp, kind, side, requested_btc, moved_btc, status, routes, order_count, asset_amount, quote_usd, avg_price, orders, avg_price_btc)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         entry.id,
@@ -269,7 +269,8 @@ export class Repo {
         entry.assetAmount ?? null,
         entry.quoteUsd ?? null,
         entry.avgPrice ?? null,
-        entry.orders ?? null
+        entry.orders ?? null,
+        entry.avgPriceBtc ?? null
       );
   }
 
@@ -287,14 +288,23 @@ export class Repo {
     return row.total;
   }
 
+  /** Wipes backfilled order summaries on rows older than `beforeTs` (rows recorded live by v0.1.7+ are newer and kept). */
+  clearExecutionFillsBefore(beforeTs: number): void {
+    this.db
+      .prepare(
+        "UPDATE execution_log SET order_count = NULL, asset_amount = NULL, quote_usd = NULL, avg_price = NULL, orders = NULL, avg_price_btc = NULL WHERE timestamp < ?"
+      )
+      .run(beforeTs);
+  }
+
   /** Fills in the order summary of an already-logged execution (backfill). */
   setExecutionFills(
     id: string,
-    f: { orderCount: number; assetAmount: number; quoteUsd: number; avgPrice: number; orders: string }
+    f: { orderCount: number; assetAmount: number; quoteUsd: number; avgPrice: number; orders: string; avgPriceBtc?: number }
   ): void {
     this.db
-      .prepare("UPDATE execution_log SET order_count = ?, asset_amount = ?, quote_usd = ?, avg_price = ?, orders = ? WHERE id = ?")
-      .run(f.orderCount, f.assetAmount, f.quoteUsd, f.avgPrice, f.orders, id);
+      .prepare("UPDATE execution_log SET order_count = ?, asset_amount = ?, quote_usd = ?, avg_price = ?, orders = ?, avg_price_btc = ? WHERE id = ?")
+      .run(f.orderCount, f.assetAmount, f.quoteUsd, f.avgPrice, f.orders, f.avgPriceBtc ?? null, id);
   }
 
   /** Most recent execution attempts for this pair, newest first - powers the Timeline tab. */
@@ -521,6 +531,7 @@ function rowToExecutionLogEntry(row: unknown): ExecutionLogEntry {
     ...(r.quote_usd != null ? { quoteUsd: r.quote_usd as number } : {}),
     ...(r.avg_price != null ? { avgPrice: r.avg_price as number } : {}),
     ...(r.orders != null ? { orders: r.orders as string } : {}),
+    ...(r.avg_price_btc != null ? { avgPriceBtc: r.avg_price_btc as number } : {}),
   };
 }
 

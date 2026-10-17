@@ -30,6 +30,8 @@ export interface ExecutionLogEntry {
   quoteUsd?: number;
   /** True average fill price (USDT per asset unit). */
   avgPrice?: number;
+  /** The same average in BTC per asset unit (each order converted at the BTC/USDT price when it filled). */
+  avgPriceBtc?: number;
   /** JSON array of every filled order: {symbol, action, base, price}. */
   orders?: string;
 }

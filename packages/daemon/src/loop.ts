@@ -15,10 +15,12 @@ import { gate } from "./gate.js";
 import { actualRatioFromFills, executeRotation, sellHoldingForUsdt, summarizeFills, type OrderFill } from "./execute.js";
 
 /** Order-summary columns for an execution_log row (empty when no asset-leg order filled). */
-function fillFields(fills: OrderFill[] | undefined, assetSymbol: string) {
+function fillFields(fills: OrderFill[] | undefined, assetSymbol: string, btcSymbol?: string, btcRef?: number) {
   const s = summarizeFills(fills, assetSymbol);
   if (!s) return {};
+  const ratio = btcSymbol ? actualRatioFromFills(fills, assetSymbol, btcSymbol, btcRef) : undefined;
   return {
+    ...(ratio ? { avgPriceBtc: 1 / ratio } : {}),
     orderCount: s.orderCount,
     assetAmount: s.assetAmount,
     quoteUsd: s.quoteUsd,
@@ -571,7 +573,9 @@ async function gateAndExecute(
           routes: "usdt",
           ...fillFields(
             executeResult.fills?.filter((f) => f.symbol === exitDestination.pair.assetUsdtSymbol),
-            exitDestination.pair.assetUsdtSymbol
+            exitDestination.pair.assetUsdtSymbol,
+            exitDestination.pair.btcUsdtSymbol,
+            executeResult.btcUsdtPrice
           ),
         });
       }
@@ -601,7 +605,7 @@ async function gateAndExecute(
       movedBtc: executeResult.totalBtcMoved,
       status: executeResult.totalBtcMoved > 0 ? "executed" : "blocked",
       routes: executeResult.routeDecisions.map((rd) => rd.route).join(","),
-      ...fillFields(executeResult.fills, pair.assetUsdtSymbol),
+      ...fillFields(executeResult.fills, pair.assetUsdtSymbol, pair.btcUsdtSymbol, executeResult.btcUsdtPrice),
     });
 
     // Bug found live Aug 2026 (same class as the #100 resize fix): this used
@@ -751,7 +755,7 @@ async function gateAndExecute(
             movedBtc: executeResult.totalBtcMoved,
             status: executeResult.totalBtcMoved > 0 ? "executed" : "blocked",
             routes: executeResult.routeDecisions.map((rd) => rd.route).join(","),
-            ...fillFields(executeResult.fills, pair.assetUsdtSymbol),
+            ...fillFields(executeResult.fills, pair.assetUsdtSymbol, pair.btcUsdtSymbol, executeResult.btcUsdtPrice),
           });
           if (executeResult.totalBtcMoved <= 0) {
             resizeBlocked = true;
@@ -821,7 +825,7 @@ async function gateAndExecute(
             movedBtc: executeResult.totalBtcMoved,
             status: "executed",
             routes: executeResult.routeDecisions.map((rd) => rd.route).join(","),
-            ...fillFields(executeResult.fills, pair.assetUsdtSymbol),
+            ...fillFields(executeResult.fills, pair.assetUsdtSymbol, pair.btcUsdtSymbol, executeResult.btcUsdtPrice),
           });
         }
         rotated = true;

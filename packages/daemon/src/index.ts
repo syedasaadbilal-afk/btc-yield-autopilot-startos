@@ -108,7 +108,11 @@ async function main() {
         baseUrl: process.env.BFX_BASE_URL ?? "https://api.bitfinex.com",
         runMode: repo.getRunMode(INITIAL_RUN_MODE),
       });
-      const r = await backfillExecutionFills({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
+      // Bounded so a hung request can never hold up the first tick.
+      const r = await Promise.race([
+        backfillExecutionFills({ client, repo, config: DEFAULT_STRATEGY_CONFIG }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("backfill timed out after 120s")), 120_000)),
+      ]);
       repo.markBackfillDone(BACKFILL_NAME);
       console.log(`[autopilot] backfill done: ${r.executionsUpdated} executions, ${r.tradesUpdated} trades updated.`);
     } catch (err) {

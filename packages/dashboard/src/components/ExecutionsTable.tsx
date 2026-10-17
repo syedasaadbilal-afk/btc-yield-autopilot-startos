@@ -22,7 +22,7 @@ function orderSummary(e: ExecutionLogEntry): string | null {
   const verb = e.side === "sell_btc_for_xaut" ? "bought" : "sold";
   const per = e.quoteUsd / e.orderCount;
   const priceDigits = e.avgPrice >= 100 ? 2 : e.avgPrice >= 1 ? 3 : 6;
-  return `${e.orderCount} × ~$${fmtNum(per, 0)} orders ${verb} ${fmtNum(e.assetAmount, 4)} ${asset} (avg $${fmtNum(e.avgPrice, priceDigits)}, total $${fmtNum(e.quoteUsd, 0)})`;
+  return `${e.orderCount} × ~$${fmtNum(per, 0)} orders ${verb} ${fmtNum(e.assetAmount, 4)} ${asset} (avg $${fmtNum(e.avgPrice, priceDigits)}${e.avgPriceBtc ? ` = ${e.avgPriceBtc.toFixed(8)} BTC` : ""}, total $${fmtNum(e.quoteUsd, 0)})`;
 }
 
 /**
