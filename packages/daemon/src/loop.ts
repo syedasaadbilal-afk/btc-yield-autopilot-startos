@@ -1,4 +1,4 @@
-import type { Candle, PairConfig, PositionState, StrategyConfig } from "@autopilot/shared";
+import type { Candle, ExecutionLogEntry, PairConfig, PositionState, StrategyConfig } from "@autopilot/shared";
 import { computeBtcEquivalentNav } from "@autopilot/shared";
 import {
   computePortfolioAllocation,
@@ -13,6 +13,31 @@ import type { BitfinexRestClient } from "@autopilot/bitfinex-client";
 import type { Repo } from "./db/repo.js";
 import { gate } from "./gate.js";
 import { actualRatioFromFills, executeRotation, sellHoldingForUsdt, summarizeFills, type OrderFill } from "./execute.js";
+
+/**
+ * Crash-safe progress logging: after each filled order, upsert this execution's
+ * row with everything filled so far (routes "in-progress"). The final
+ * insertExecutionLog with the same id replaces it with the complete record; if
+ * the process dies mid-rotation, the progress row is what remains.
+ */
+function progressLogger(
+  repo: Repo,
+  pair: PairConfig,
+  meta: Pick<ExecutionLogEntry, "id" | "timestamp" | "kind" | "side" | "requestedBtc">
+) {
+  return (fills: OrderFill[], btcRef: number) => {
+    const s = summarizeFills(fills, pair.assetUsdtSymbol);
+    if (!s || !(btcRef > 0)) return;
+    repo.insertExecutionLog({
+      ...meta,
+      pairKey: pair.key,
+      movedBtc: s.quoteUsd / btcRef,
+      status: "executed",
+      routes: "in-progress",
+      ...fillFields(fills, pair.assetUsdtSymbol, pair.btcUsdtSymbol, btcRef),
+    });
+  };
+}
 
 /** Order-summary columns for an execution_log row (empty when no asset-leg order filled). */
 function fillFields(fills: OrderFill[] | undefined, assetSymbol: string, btcSymbol?: string, btcRef?: number) {
@@ -552,6 +577,13 @@ async function gateAndExecute(
           config,
           chunkUsd: repo.getChunkUsd(config.execution.chunkUsd ?? 10_000),
           reserveUsd: repo.getCashReserveUsd(),
+          onFill: progressLogger(repo, pair, {
+            id: `${pair.key}-${now}-flip`,
+            timestamp: now,
+            kind: decision.target === "long" ? "flip_exit" : "flip_entry",
+            side,
+            requestedBtc: btcCapital,
+          }),
           ...(decision.target === "long" && exitDestination && exitDestination.btcAmount > 0
             ? { destination: { ...exitDestination } }
             : {}),
@@ -739,7 +771,8 @@ async function gateAndExecute(
             `[${pair.key}] resizing allocation ${lastAppliedFraction !== undefined ? (lastAppliedFraction * 100).toFixed(0) + "%" : "unset"} -> ${(targetFraction * 100).toFixed(0)}% (${resizeBtcCapital.toFixed(8)} BTC, side ${side}, dual-gold target: ${isDualGoldState})`
           );
           const executeResult = await executeRotation({ client, side, btcCapital: resizeBtcCapital, pair, config, chunkUsd: repo.getChunkUsd(config.execution.chunkUsd ?? 10_000),
-          reserveUsd: repo.getCashReserveUsd() });
+          reserveUsd: repo.getCashReserveUsd(),
+          onFill: progressLogger(repo, pair, { id: `${pair.key}-${now}-resize`, timestamp: now, kind: "resize", side, requestedBtc: resizeBtcCapital }) });
           for (const rd of executeResult.routeDecisions) {
             console.log(
               `[${pair.key}] resize tranche ${rd.trancheIndex} routed via "${rd.route}" (direct ${rd.directSlippageBtc.toFixed(6)} BTC vs usdt ${rd.usdtSlippageBtc.toFixed(6)} BTC estimated slippage)`
@@ -806,6 +839,7 @@ async function gateAndExecute(
           config,
           chunkUsd: repo.getChunkUsd(config.execution.chunkUsd ?? 10_000),
           reserveUsd: repo.getCashReserveUsd(),
+          onFill: progressLogger(repo, pair, { id: `${pair.key}-${now}-topup`, timestamp: now, kind: "topup", side: "sell_btc_for_xaut", requestedBtc: topUpBtc }),
         });
         for (const rd of executeResult.routeDecisions) {
           console.log(

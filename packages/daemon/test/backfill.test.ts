@@ -77,8 +77,11 @@ describe("backfillExecutionFills", () => {
       getCandlesBetween: async () => [{ timestamp: t0, open: 82_000, close: 82_000, high: 82_000, low: 82_000, volume: 1 }],
     } as unknown as BitfinexRestClient;
     const r = await backfillExecutionFills({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
-    expect(r.executionsUpdated).toBe(0);
-    expect(repo.getRecentExecutions("xmr", 5)[0]!.orderCount).toBeUndefined();
+    // Not attributed to the dust row; the real fills surface as their own clearly labelled recovered row.
+    const rows = repo.getRecentExecutions("xmr", 5);
+    expect(rows.find((x) => x.id === `xmr-${t0}-topup`)!.orderCount).toBeUndefined();
+    expect(rows.filter((x) => x.routes === "recovered")).toHaveLength(1);
+    expect(r.executionsUpdated).toBe(1);
   });
 });
 
@@ -108,3 +111,63 @@ describe("per-fill BTC conversion", () => {
     expect(row.avgPriceBtc).toBeCloseTo(expectedBtc / 10, 8);
   });
 });
+
+describe("direct (asset/BTC) route", () => {
+  it("reconciles early executions that traded on the BTC-quoted market, no conversion needed", async () => {
+    const db = openDatabase(":memory:");
+    applyMigrations(db);
+    const repo = new Repo(db);
+    const pair = DEFAULT_STRATEGY_CONFIG.pairs.find((p) => p.key === "xmr")!;
+    const t0 = Date.UTC(2026, 8, 28, 4, 59, 0);
+    repo.insertExecutionLog({ id: `xmr-${t0}-flip`, pairKey: "xmr", timestamp: t0, kind: "flip_entry", side: "sell_btc_for_xaut", requestedBtc: 0.005, movedBtc: 0.004997, status: "executed", routes: "direct,direct,direct" });
+    repo.insertTrade({ id: `xmr-${t0 - 86_400_000}`, runMode: "LIVE", pairKey: "xmr", openedAt: t0 - 86_400_000, targetPosition: "long", btcCapitalAtOpen: 0.005, riskFractionOfCapital: 0.01, stopLossRatio: 0, firstTargetRatio: 0, entryPrice: 160, status: "open", trancheExecutionPlanIds: [] });
+    repo.closeTrade(`xmr-${t0 - 86_400_000}`, "closed_win", 0, 150, t0);
+    const hist = {
+      [pair.ratioSymbol]: [
+        { orderId: "1", firstAt: t0 + 5_000, side: "buy" as const, filled: 0.4, avgPrice: 0.0065 },
+        { orderId: "2", firstAt: t0 + 60_000, side: "buy" as const, filled: 0.36, avgPrice: 0.0066 },
+      ],
+    } as Record<string, Array<{ orderId: string; firstAt: number; side: "buy" | "sell"; filled: number; avgPrice: number }>>;
+    const candles = [{ timestamp: t0, open: 80_000, close: 80_000, high: 80_000, low: 80_000, volume: 1 }];
+    const client = { getTradeFills: async (sym: string) => hist[sym] ?? [], getCandlesBetween: async () => candles } as unknown as BitfinexRestClient;
+    const r = await backfillExecutionFills({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    expect(r.executionsUpdated).toBe(1);
+    const row = repo.getRecentExecutions("xmr", 5)[0]!;
+    const costBtc = 0.4 * 0.0065 + 0.36 * 0.0066;
+    expect(row.orderCount).toBe(2);
+    expect(row.avgPriceBtc).toBeCloseTo(costBtc / 0.76, 10);
+    expect(row.avgPrice).toBeCloseTo((costBtc * 80_000) / 0.76, 4); // USD view = BTC cost at the BTC/USDT price
+    expect(repo.getRecentTrades("xmr", 5)[0]!.actualExitPrice).toBeCloseTo(0.76 / costBtc, 6); // asset per BTC
+  });
+});
+
+describe("recovery of unlogged buys", () => {
+  it("adds labelled 'recovered' rows for runs of orders no log row accounts for (bot-only account), never for sells", async () => {
+    const db = openDatabase(":memory:");
+    applyMigrations(db);
+    const repo = new Repo(db);
+    const pair = DEFAULT_STRATEGY_CONFIG.pairs.find((p) => p.key === "xmr")!;
+    const t0 = Date.UTC(2026, 9, 8, 6, 20, 0);
+    // The only logged row is a dust top-up, far smaller than what really happened.
+    repo.insertExecutionLog({ id: `xmr-${t0}-topup`, pairKey: "xmr", timestamp: t0, kind: "topup", side: "sell_btc_for_xaut", requestedBtc: 0.000151, movedBtc: 0.000149, status: "executed", routes: "usdt" });
+    const chunks = Array.from({ length: 5 }, (_, i) => ({ orderId: `c${i}`, firstAt: t0 + (i + 1) * 10 * 60_000, side: "buy" as const, filled: 3.5, avgPrice: 570 }));
+    const lone = { orderId: "lone", firstAt: t0 + 20 * 3_600_000, side: "buy" as const, filled: 0.5, avgPrice: 570 };
+    const sell = { orderId: "s1", firstAt: t0 + 30 * 60_000, side: "sell" as const, filled: 3, avgPrice: 570 };
+    const hist = { [pair.assetUsdtSymbol]: [...chunks, sell, lone] } as Record<string, Array<{ orderId: string; firstAt: number; side: "buy" | "sell"; filled: number; avgPrice: number }>>;
+    const candles = [{ timestamp: t0, open: 82_000, close: 82_000, high: 82_000, low: 82_000, volume: 1 }];
+    const client = { getTradeFills: async (sym: string) => hist[sym] ?? [], getCandlesBetween: async () => candles } as unknown as BitfinexRestClient;
+    await backfillExecutionFills({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    const rows = repo.getRecentExecutions("xmr", 10);
+    const rec = rows.filter((r) => r.routes === "recovered");
+    expect(rec).toHaveLength(2); // the 5-order run and the lone later order (account is bot-only); sells are never recovered
+    expect(rec[0]!.orderCount).toBe(1); // newest first: the lone order
+    expect(rec[1]!.orderCount).toBe(5);
+    expect(rec[1]!.assetAmount).toBeCloseTo(17.5);
+    expect(rec[1]!.avgPrice).toBeCloseTo(570);
+    expect(rec[1]!.avgPriceBtc).toBeCloseTo(570 / 82_000, 8);
+    // Re-running replaces rather than duplicates.
+    await backfillExecutionFills({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    expect(repo.getRecentExecutions("xmr", 10).filter((r) => r.routes === "recovered")).toHaveLength(2);
+  });
+});
+

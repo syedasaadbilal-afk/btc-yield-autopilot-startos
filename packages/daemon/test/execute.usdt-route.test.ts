@@ -153,3 +153,42 @@ describe("executeRotation - mandated USDT routing", () => {
     expect(r.totalBtcMoved).toBeGreaterThan(0);
   });
 });
+
+describe("executeRotation - progress callback", () => {
+  it("reports cumulative fills after every filled order, so an interrupted run still leaves a record", async () => {
+    const { client } = fake({ BTC: 0, UST: 10_000, XMR: 0 });
+    const seen: number[] = [];
+    await executeRotation({
+      client,
+      side: "sell_btc_for_xaut",
+      btcCapital: 0.09,
+      pair: XMR,
+      config: DEFAULT_STRATEGY_CONFIG,
+      chunkUsd: 2_000,
+      ...fillWait,
+      onFill: (fills, btcPx) => {
+        expect(btcPx).toBe(BTC_USD);
+        seen.push(fills.length);
+      },
+    });
+    expect(seen.length).toBeGreaterThan(2);
+    expect(seen).toEqual(seen.map((_, i) => i + 1)); // 1, 2, 3 ... one callback per filled order
+  });
+
+  it("a failing progress callback never breaks the rotation", async () => {
+    const { client, bal } = fake({ BTC: 0, UST: 10_000, XMR: 0 });
+    await executeRotation({
+      client,
+      side: "sell_btc_for_xaut",
+      btcCapital: 0.09,
+      pair: XMR,
+      config: DEFAULT_STRATEGY_CONFIG,
+      ...fillWait,
+      onFill: () => {
+        throw new Error("db locked");
+      },
+    });
+    expect(bal.XMR).toBeGreaterThan(0);
+  });
+});
+

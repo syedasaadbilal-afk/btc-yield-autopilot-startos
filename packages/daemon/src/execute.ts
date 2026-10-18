@@ -205,6 +205,12 @@ export async function executeRotation(params: {
    * spend idle USDT first). Anything beyond btcAmount goes to BTC.
    */
   destination?: { pair: PairConfig; btcAmount: number; mode: "buy" | "hold" };
+  /**
+   * Called after every order that fills (even partially) with the cumulative fills and
+   * the reference BTC/USDT price, so callers can persist progress immediately: a long
+   * rotation (hours of chunk orders) that is interrupted by a restart still leaves a record.
+   */
+  onFill?: (fills: OrderFill[], btcUsdtPrice: number) => void;
 }): Promise<ExecuteRotationResult> {
   const { client, side, pair, config, destination } = params;
   const reserveUsd = params.reserveUsd ?? 0;
@@ -271,7 +277,14 @@ export async function executeRotation(params: {
   const placeAndWait = async (symbol: string, action: "buy" | "sell", baseAmount: number, limitPx: number): Promise<number> => {
     const r = await placeLimitAndWait(client, orderOpts, symbol, action, baseAmount, limitPx);
     if (!r.dry) isLive = true;
-    if (r.filled > 0) fills.push({ symbol, action, base: r.filled, price: r.avgPrice });
+    if (r.filled > 0) {
+      fills.push({ symbol, action, base: r.filled, price: r.avgPrice });
+      try {
+        params.onFill?.(fills, btcUsdtPrice);
+      } catch (err) {
+        console.warn(`[${pair.key}] progress logging failed (continuing): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     return r.filled;
   };
 

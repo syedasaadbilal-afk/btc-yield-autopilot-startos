@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import type { NavPoint, Trade } from "@autopilot/shared";
+import type { ExecutionLogEntry, NavPoint, Trade } from "@autopilot/shared";
 import type { PairStatus } from "../api.js";
-import { fetchTrades } from "../api.js";
+import { fetchExecutions, fetchTrades } from "../api.js";
 import { formatBtcAmount, type DisplayUnit } from "../format.js";
 import { NavChart } from "./NavChart.js";
 import { PositionsTable } from "./PositionsTable.js";
@@ -42,11 +42,15 @@ export function PairPanel({
   color: string;
 }) {
   const [trades, setTrades] = useState<Trade[]>([]);
+  const [executions, setExecutions] = useState<ExecutionLogEntry[]>([]);
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      const t = await fetchTrades(status.pairKey, 5);
-      if (!cancelled) setTrades(t);
+      const [t, ex] = await Promise.all([fetchTrades(status.pairKey, 5), fetchExecutions(status.pairKey, 200)]);
+      if (!cancelled) {
+        setTrades(t);
+        setExecutions(ex);
+      }
     }
     load();
     const interval = setInterval(load, 30_000);
@@ -122,7 +126,7 @@ export function PairPanel({
       <div className="border-t border-slate-800 pt-3">
         <h3 className="text-[11px] font-semibold tracking-wider text-slate-500 uppercase mb-2">Recent trades</h3>
         <div className="overflow-x-auto">
-          <PositionsTable trades={trades} unit={unit} currentRatio={status.latestRatio ?? null} />
+          <PositionsTable trades={trades} unit={unit} currentRatio={status.latestRatio ?? null} executions={executions} assetLabel={status.displayName.split(" ")[0]} />
         </div>
       </div>
     </section>

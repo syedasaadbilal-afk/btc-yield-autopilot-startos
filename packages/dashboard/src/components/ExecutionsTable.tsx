@@ -57,7 +57,9 @@ export function ExecutionsTable({ executions, unit }: { executions: ExecutionLog
             <td className="py-1.5 pr-3 text-slate-400">{e.side === "sell_btc_for_xaut" ? "BTC → asset" : "asset → BTC"}</td>
             <td className="py-1.5 pr-3">{formatBtcAmount(e.requestedBtc, unit)}</td>
             <td className="py-1.5 pr-3">{formatBtcAmount(e.movedBtc, unit)}</td>
-            <td className="py-1.5 pr-3 text-slate-500">{orderSummary(e) ?? (e.routes || "-")}</td>
+            <td className="py-1.5 pr-3 text-slate-500">{orderSummary(e) ?? (e.routes || "-")}
+                    {e.routes === "recovered" && <span className="ml-1 text-amber-400/80">(recovered from exchange history - not logged by the bot at the time)</span>}
+                    {e.routes === "in-progress" && <span className="ml-1 text-sky-400/80">(run interrupted or still in progress)</span>}</td>
             <td className="py-1.5 pr-3">
               <span className={`px-1.5 py-0.5 rounded text-[11px] ${STATUS_STYLES[e.status]}`}>{e.status}</span>
             </td>

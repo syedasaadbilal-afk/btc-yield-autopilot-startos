@@ -1,5 +1,5 @@
 import { Fragment } from "react";
-import { deriveAssetHolds, type Trade } from "@autopilot/shared";
+import { deriveAssetHolds, type ExecutionLogEntry, type Trade } from "@autopilot/shared";
 import { formatBtcAmount, type DisplayUnit } from "../format.js";
 
 function formatReturn(pnl: number | undefined, capital: number): string {
@@ -72,15 +72,44 @@ function unrealizedPct(entry: number | undefined, current: number | null | undef
   return (entry / current - 1) * 100;
 }
 
+/**
+ * Volume-weighted average cost (BTC per asset unit) of every logged buy since the
+ * position opened - the entry flip PLUS later top-ups and resizes - using each
+ * execution's real fills. Only executions with fill data count, so `amount` says
+ * how much of the position the average is based on.
+ */
+function positionCost(
+  executions: ExecutionLogEntry[] | undefined,
+  entryAt: number | undefined
+): { avgBtc: number; amount: number; buys: number } | undefined {
+  if (!executions || entryAt === undefined) return undefined;
+  let amount = 0;
+  let cost = 0;
+  let buys = 0;
+  for (const e of executions) {
+    if (e.side !== "sell_btc_for_xaut" || e.status !== "executed" || e.timestamp < entryAt - 120_000) continue;
+    if (!e.assetAmount || !e.avgPriceBtc) continue;
+    amount += e.assetAmount;
+    cost += e.assetAmount * e.avgPriceBtc;
+    buys += e.orderCount ?? 1;
+  }
+  return amount > 0 ? { avgBtc: cost / amount, amount, buys } : undefined;
+}
+
 const fmtPct = (p: number) => `${p >= 0 ? "+" : ""}${p.toFixed(2)}%`;
 
 export function PositionsTable({
   trades,
   unit,
   currentRatio,
+  executions,
+  assetLabel,
 }: {
   trades: Trade[];
   unit: DisplayUnit;
+  /** This pair's executions, used to derive the open position's average cost across all buys. */
+  executions?: ExecutionLogEntry[];
+  assetLabel?: string;
   /** Latest asset-per-BTC ratio, for the open trade's unrealized return. */
   currentRatio?: number | null;
 }) {
@@ -129,7 +158,9 @@ export function PositionsTable({
             const isOpen = t.exitAt === undefined && t.entryAt !== undefined;
             const uActual = isOpen ? unrealizedPct(t.actualEntryPrice, currentRatio) : undefined;
             const uSignal = isOpen ? unrealizedPct(t.entryPrice, currentRatio) : undefined;
-            const u = uActual ?? uSignal;
+            const cost = isOpen ? positionCost(executions, t.entryAt) : undefined;
+            const uAvg = cost && currentRatio && currentRatio > 0 ? (1 / currentRatio / cost.avgBtc - 1) * 100 : undefined;
+            const u = uAvg ?? uActual ?? uSignal;
             const uColor = u === undefined ? "" : u >= 0 ? "text-emerald-400" : "text-red-400";
             const sizeCell = t.size !== undefined ? formatBtcAmount(t.size, unit) : "-";
 
@@ -170,7 +201,8 @@ export function PositionsTable({
                       <>
                         {fmtPct(u)}
                         <div className="text-[10px] text-slate-500">
-                          unrealized{uActual !== undefined && uSignal !== undefined ? ` (signal ${fmtPct(uSignal)})` : ""}
+                          unrealized{uAvg !== undefined ? " vs avg cost" : ""}
+                          {uSignal !== undefined && uAvg !== undefined ? ` (signal entry ${fmtPct(uSignal)})` : uActual !== undefined && uSignal !== undefined ? ` (signal ${fmtPct(uSignal)})` : ""}
                         </div>
                       </>
                     ) : (
@@ -185,6 +217,11 @@ export function PositionsTable({
                   </td>
                   <td className="py-1.5 pr-3">
                     <PriceCell actual={t.actualEntryPrice} signal={t.entryPrice} />
+                    {cost && (
+                      <div className="text-[10px] text-sky-300/80">
+                        avg cost {cost.avgBtc.toFixed(8)} ({cost.buys} buys, {cost.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {assetLabel ?? "asset"})
+                      </div>
+                    )}
                   </td>
                   <td className="py-1.5 pr-3">{sizeCell}</td>
                 </tr>

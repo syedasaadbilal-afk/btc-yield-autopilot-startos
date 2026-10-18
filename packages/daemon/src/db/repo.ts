@@ -252,7 +252,7 @@ export class Repo {
   insertExecutionLog(entry: ExecutionLogEntry): void {
     this.db
       .prepare(
-        `INSERT INTO execution_log (id, pair_key, timestamp, kind, side, requested_btc, moved_btc, status, routes, order_count, asset_amount, quote_usd, avg_price, orders, avg_price_btc)
+        `INSERT OR REPLACE INTO execution_log (id, pair_key, timestamp, kind, side, requested_btc, moved_btc, status, routes, order_count, asset_amount, quote_usd, avg_price, orders, avg_price_btc)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
@@ -290,6 +290,8 @@ export class Repo {
 
   /** Wipes backfilled order summaries on rows older than `beforeTs` (rows recorded live by v0.1.7+ are newer and kept). */
   clearExecutionFillsBefore(beforeTs: number): void {
+    // Rows a previous backfill added from exchange history are rebuilt from scratch too.
+    this.db.prepare("DELETE FROM execution_log WHERE routes = 'recovered' AND timestamp < ?").run(beforeTs);
     this.db
       .prepare(
         "UPDATE execution_log SET order_count = NULL, asset_amount = NULL, quote_usd = NULL, avg_price = NULL, orders = NULL, avg_price_btc = NULL WHERE timestamp < ?"
