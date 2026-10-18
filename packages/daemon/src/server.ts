@@ -91,6 +91,23 @@ export async function createServer(opts: CreateServerOptions) {
     console.warn(`[autopilot] dashboard static dir not found (${opts.staticDir ?? "unset"}) - serving API only`);
   }
 
+  /**
+   * "Funded" for a pair that currently holds its asset: what the units held actually cost, i.e. the
+   * volume-weighted average buy price since the position was entered (from real fills) times the units
+   * held. Deposits and top-ups that were deployed into the pair at later prices are therefore part of
+   * the cost basis, so the NAV % measures real gain instead of treating new money as profit.
+   * Undefined (caller falls back to the funding baseline) when it cannot be computed.
+   */
+  const costBasisFunded = (pairKey: string, position: string, held: number | undefined): number | undefined => {
+    if (position !== "flat" || !held || held <= 0) return undefined;
+    const closed = opts.repo
+      .getRecentTrades(pairKey, 20)
+      .filter((t) => t.closedAt !== undefined && t.status !== "cancelled")
+      .sort((a, b) => b.closedAt! - a.closedAt!)[0];
+    const cost = opts.repo.getPositionCost(pairKey, (closed?.closedAt ?? 0) - 120_000);
+    return cost ? cost.avgBtc * held : undefined;
+  };
+
   fastify.get("/api/status", async () => {
     const runMode = opts.repo.getRunMode();
     const liveBalances = await getLiveWalletBalances();
@@ -160,7 +177,7 @@ export async function createServer(opts: CreateServerOptions) {
         // changes - see gateAndExecute. Falls back to the current NAV (or
         // the static starting-capital estimate) before this pair has ever
         // ticked and set a baseline at all.
-        fundedBtc:
+        fundedBtc: costBasisFunded(pair.key, currentPosition, liveBalances[PAIR_WALLET_CURRENCY[pair.key] ?? ""]) ??
           opts.repo.getFundingBaseline(pair.key)?.btcEquivalentNav ??
           latestNav?.btcEquivalentNav ??
           DEFAULT_STRATEGY_CONFIG.capital.startingBtc * targetFractionBtc,

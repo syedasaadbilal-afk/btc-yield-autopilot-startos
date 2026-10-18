@@ -126,7 +126,7 @@ export function PairPanel({
       <div className="border-t border-slate-800 pt-3">
         <h3 className="text-[11px] font-semibold tracking-wider text-slate-500 uppercase mb-2">Recent trades</h3>
         <div className="overflow-x-auto">
-          <PositionsTable trades={trades} unit={unit} currentRatio={status.latestRatio ?? null} executions={executions} assetLabel={status.displayName.split(" ")[0]} />
+          <PositionsTable trades={trades} unit={unit} currentRatio={status.latestRatio ?? null} executions={executions} assetLabel={status.displayName.split(" ")[0]} heldAsset={status.realAssetHeld ?? null} />
         </div>
       </div>
     </section>

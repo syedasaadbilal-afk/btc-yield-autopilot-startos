@@ -327,9 +327,11 @@ export class BitfinexRestClient {
   async getTradeFills(
     symbol: string,
     startMs: number,
-    endMs: number
-  ): Promise<Array<{ orderId: string; firstAt: number; side: "buy" | "sell"; filled: number; avgPrice: number }>> {
-    const byOrder = new Map<string, { firstAt: number; buy: boolean; base: number; quote: number }>();
+    endMs: number,
+    /** Currency code of the base asset (e.g. "XMR"); fees charged in it are summed per order as `feeBase`. */
+    baseCurrency?: string
+  ): Promise<Array<{ orderId: string; firstAt: number; side: "buy" | "sell"; filled: number; avgPrice: number; feeBase: number }>> {
+    const byOrder = new Map<string, { firstAt: number; buy: boolean; base: number; quote: number; fee: number }>();
     let end = endMs;
     for (let page = 0; page < 10; page++) {
       const rows = await this.authPost(`v2/auth/r/trades/${symbol}/hist`, { start: startMs, end, limit: 2500, sort: -1 });
@@ -344,7 +346,9 @@ export class BitfinexRestClient {
         if (!(px > 0) || amt === 0) continue;
         oldest = Math.min(oldest, mts);
         const key = String(r[3]);
-        const cur = byOrder.get(key) ?? { firstAt: mts, buy: amt > 0, base: 0, quote: 0 };
+        const cur = byOrder.get(key) ?? { firstAt: mts, buy: amt > 0, base: 0, quote: 0, fee: 0 };
+        // [.., FEE (negative), FEE_CURRENCY, ..] at indexes 9 and 10.
+        if (baseCurrency && String(r[10]) === baseCurrency) cur.fee += Number(r[9]) || 0;
         cur.firstAt = Math.min(cur.firstAt, mts);
         cur.base += Math.abs(amt);
         cur.quote += Math.abs(amt) * px;
@@ -360,6 +364,7 @@ export class BitfinexRestClient {
         side: (o.buy ? "buy" : "sell") as "buy" | "sell",
         filled: o.base,
         avgPrice: o.base > 0 ? o.quote / o.base : 0,
+        feeBase: o.fee,
       }))
       .sort((x, y) => x.firstAt - y.firstAt);
   }

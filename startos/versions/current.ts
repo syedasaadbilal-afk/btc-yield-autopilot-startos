@@ -1,8 +1,8 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 export const current = VersionInfo.of({
-  version: '0.1.10:0',
+  version: '0.1.11:0',
   releaseNotes: {
-    en_US: 'Every filled order is now logged the moment it fills, so a restart mid-run no longer loses the record. The backfill also recovers buys that were never logged (long runs of chunk orders) as labelled recovered rows, and covers executions routed through the direct XMR/BTC (XAUT/BTC) market, not just the USDT pairs. Redone from Bitfinex trade history (long retention, exact fills): every fill is converted to BTC at the BTC/USDT price of its own minute, with a sanity check against the logged amounts. Older executions and trades get order summaries and real average fill prices in USDT and BTC.',
+    en_US: 'Signal prices follow the TradingView convention (open of the bar a signal executes in), with a restatement of past trades. The funded baseline and percentage of a pair holding its asset now use the real cost of the units held (average buy price from real fills), so later deposits and top-ups no longer show as profit. The backfill logs an exchange-history reconciliation (bought, sold, fees versus wallet), and the average-cost line shows how much of the held balance it covers. Every filled order is logged the moment it fills, unlogged buys are recovered as labelled rows, and the direct XMR/BTC market is covered.',
   },
   migrations: { up: async ({ effects }) => {}, down: IMPOSSIBLE },
 })

@@ -104,12 +104,15 @@ export function PositionsTable({
   currentRatio,
   executions,
   assetLabel,
+  heldAsset,
 }: {
   trades: Trade[];
   unit: DisplayUnit;
   /** This pair's executions, used to derive the open position's average cost across all buys. */
   executions?: ExecutionLogEntry[];
   assetLabel?: string;
+  /** Live wallet balance of the asset, to show how much of the position the average cost covers. */
+  heldAsset?: number | null;
   /** Latest asset-per-BTC ratio, for the open trade's unrealized return. */
   currentRatio?: number | null;
 }) {
@@ -219,7 +222,7 @@ export function PositionsTable({
                     <PriceCell actual={t.actualEntryPrice} signal={t.entryPrice} />
                     {cost && (
                       <div className="text-[10px] text-sky-300/80">
-                        avg cost {cost.avgBtc.toFixed(8)} ({cost.buys} buys, {cost.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {assetLabel ?? "asset"})
+                        avg cost {cost.avgBtc.toFixed(8)} ({cost.buys} buys, {cost.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {assetLabel ?? "asset"}{heldAsset ? `, ${((cost.amount / heldAsset) * 100).toFixed(0)}% of ${heldAsset.toLocaleString(undefined, { maximumFractionDigits: 2 })} held` : ""})
                       </div>
                     )}
                   </td>

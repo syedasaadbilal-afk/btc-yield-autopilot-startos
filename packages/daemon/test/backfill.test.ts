@@ -171,3 +171,49 @@ describe("recovery of unlogged buys", () => {
   });
 });
 
+describe("trade price from a recovered cluster", () => {
+  it("gives the entry-into-asset leg a real price when its orders only surfaced as a recovered row", async () => {
+    const db = openDatabase(":memory:");
+    applyMigrations(db);
+    const repo = new Repo(db);
+    const pair = DEFAULT_STRATEGY_CONFIG.pairs.find((p) => p.key === "xmr")!;
+    const t0 = Date.UTC(2026, 8, 28, 1, 59, 0);
+    // The flip row under-reports what moved, so its orders are rejected and recovered instead.
+    repo.insertExecutionLog({ id: `xmr-${t0}-flip`, pairKey: "xmr", timestamp: t0, kind: "flip_entry", side: "sell_btc_for_xaut", requestedBtc: 0.0001, movedBtc: 0.0001, status: "executed", routes: "direct,direct,direct" });
+    repo.insertTrade({ id: `xmr-${t0 - 86_400_000}`, runMode: "LIVE", pairKey: "xmr", openedAt: t0 - 86_400_000, targetPosition: "long", btcCapitalAtOpen: 0.005, riskFractionOfCapital: 0.01, stopLossRatio: 0, firstTargetRatio: 0, entryPrice: 160, status: "open", trancheExecutionPlanIds: [] });
+    repo.closeTrade(`xmr-${t0 - 86_400_000}`, "closed_win", 0, 150, t0);
+    const hist = { [pair.assetUsdtSymbol]: [{ orderId: "1", firstAt: t0 + 5_000, side: "buy" as const, filled: 10, avgPrice: 600 }] } as Record<string, Array<{ orderId: string; firstAt: number; side: "buy" | "sell"; filled: number; avgPrice: number }>>;
+    const candles = [{ timestamp: t0, open: 90_000, close: 90_000, high: 90_000, low: 90_000, volume: 1 }];
+    const client = { getTradeFills: async (sym: string) => hist[sym] ?? [], getCandlesBetween: async () => candles } as unknown as BitfinexRestClient;
+    await backfillExecutionFills({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    expect(repo.getRecentExecutions("xmr", 5).some((r) => r.routes === "recovered")).toBe(true);
+    expect(repo.getRecentTrades("xmr", 5)[0]!.actualExitPrice).toBeCloseTo(10 / ((10 * 600) / 90_000), 6);
+  });
+});
+
+describe("signal price restatement and position cost", () => {
+  it("restates signal prices as the open of the execution's UTC day and computes position average cost", async () => {
+    const db = openDatabase(":memory:");
+    applyMigrations(db);
+    const repo = new Repo(db);
+    const pair = DEFAULT_STRATEGY_CONFIG.pairs.find((p) => p.key === "xmr")!;
+    const day = Date.UTC(2026, 8, 28);
+    const t0 = day + 1 * 3_600_000 + 59 * 60_000; // 01:59 UTC on the day
+    repo.insertTrade({ id: "tr", runMode: "LIVE", pairKey: "xmr", openedAt: t0 - 5 * 86_400_000, targetPosition: "long", btcCapitalAtOpen: 0.005, riskFractionOfCapital: 0.01, stopLossRatio: 0, firstTargetRatio: 0, entryPrice: 150, status: "open", trancheExecutionPlanIds: [] });
+    repo.closeTrade("tr", "closed_win", 0, 154, t0);
+    const dayCandle = { timestamp: day, open: 0.0065, close: 0.0066, high: 0.0067, low: 0.0064, volume: 1 };
+    const prev = { timestamp: day - 5 * 86_400_000, open: 0.0066, close: 0.0066, high: 0.0067, low: 0.0065, volume: 1 };
+    const client = { getTradeFills: async () => [], getCandlesBetween: async () => [], getCandles: async () => [prev, dayCandle], getWallets: async () => [] } as unknown as BitfinexRestClient;
+    const live = Date.UTC(2026, 9, 20, 12, 0, 0); // after the backfill cut-off: live-recorded rows are kept
+    repo.insertExecutionLog({ id: "x1", pairKey: "xmr", timestamp: live, kind: "flip_entry", side: "sell_btc_for_xaut", requestedBtc: 0.1, movedBtc: 0.1, status: "executed", routes: "usdt", orderCount: 1, assetAmount: 10, quoteUsd: 1, avgPrice: 1, avgPriceBtc: 0.0065 });
+    repo.insertExecutionLog({ id: "x2", pairKey: "xmr", timestamp: live + 86_400_000, kind: "topup", side: "sell_btc_for_xaut", requestedBtc: 0.1, movedBtc: 0.1, status: "executed", routes: "usdt", orderCount: 1, assetAmount: 30, quoteUsd: 1, avgPrice: 1, avgPriceBtc: 0.0070 });
+    await backfillExecutionFills({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
+    const tr = repo.getRecentTrades("xmr", 5)[0]!;
+    expect(tr.exitPrice).toBeCloseTo(1 / 0.0065, 6); // entry into the asset: that day's open, asset-per-BTC
+    expect(tr.entryPrice).toBeCloseTo(1 / 0.0066, 6); // the earlier day's open
+    const cost = repo.getPositionCost("xmr", live - 120_000)!;
+    expect(cost.amount).toBeCloseTo(40);
+    expect(cost.avgBtc).toBeCloseTo((10 * 0.0065 + 30 * 0.007) / 40, 8);
+  });
+});
+

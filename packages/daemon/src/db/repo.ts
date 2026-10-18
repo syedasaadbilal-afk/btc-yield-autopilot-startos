@@ -177,6 +177,29 @@ export class Repo {
     if (prices.exit !== undefined) this.db.prepare("UPDATE trades SET actual_exit_price = ? WHERE id = ?").run(prices.exit, id);
   }
 
+  /** Restates a trade's signal prices (backfill); only the provided legs are written. */
+  setTradeSignalPrices(id: string, prices: { entry?: number; exit?: number }): void {
+    if (prices.entry !== undefined) this.db.prepare("UPDATE trades SET entry_price = ? WHERE id = ?").run(prices.entry, id);
+    if (prices.exit !== undefined) this.db.prepare("UPDATE trades SET exit_price = ? WHERE id = ?").run(prices.exit, id);
+  }
+
+  /**
+   * Volume-weighted average cost (BTC per asset unit) of every logged buy of this pair's asset since
+   * `sinceTs`, from the real fills stored on each execution. `amount` is how many asset units that
+   * average is based on.
+   */
+  getPositionCost(pairKey: string, sinceTs: number): { avgBtc: number; amount: number } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT SUM(asset_amount) AS amt, SUM(asset_amount * avg_price_btc) AS cost
+         FROM execution_log
+         WHERE pair_key = ? AND side = 'sell_btc_for_xaut' AND status = 'executed'
+           AND timestamp >= ? AND asset_amount > 0 AND avg_price_btc > 0`
+      )
+      .get(pairKey, sinceTs) as { amt: number | null; cost: number | null };
+    return row.amt && row.cost ? { avgBtc: row.cost / row.amt, amount: row.amt } : undefined;
+  }
+
   /** One-time jobs are remembered in the same table migrations use (keys are prefixed, never .sql files). */
   isBackfillDone(name: string): boolean {
     return this.db.prepare("SELECT 1 AS x FROM _migrations WHERE filename = ?").get(`backfill:${name}`) !== undefined;

@@ -667,7 +667,9 @@ async function gateAndExecute(
         executeResult.btcUsdtPrice
       );
       if (decision.target === "long") {
-        const entryPrice = accountingCandles[accountingCandles.length - 1]!.close;
+        // Signal price like-for-like with TradingView, which fills a signal at the NEXT bar's open:
+        // the open of the current daily bar (the last accounting candle is the live one).
+        const entryPrice = accountingCandles[accountingCandles.length - 1]!.open;
         const stopAndTarget = computeStopAndTarget(accountingCandles, entryPrice, "long", config);
         repo.insertTrade({
           id: `${pair.key}-${now}`,
@@ -697,7 +699,7 @@ async function gateAndExecute(
         // minus that counterfactual = btcCapitalAtOpen * (1 - entryPrice /
         // exitPrice). A rising ratio (BTC buys more asset over time) while long
         // BTC means the bet paid off -> positive PnL, confirmed by hand.
-        const exitPrice = accountingCandles[accountingCandles.length - 1]?.close;
+        const exitPrice = accountingCandles[accountingCandles.length - 1]?.open; // next-bar open, as TradingView
         // Prefer real fill prices when both legs have them; otherwise signal prices.
         const useActual = actualRatio !== undefined && openTrade.actualEntryPrice !== undefined;
         const exitBasis = useActual ? actualRatio : exitPrice;

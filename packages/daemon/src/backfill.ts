@@ -3,7 +3,7 @@ import type { Candle, ExecutionLogEntry, StrategyConfig } from "@autopilot/share
 import type { Repo } from "./db/repo.js";
 import type { OrderFill } from "./execute.js";
 
-export const BACKFILL_NAME = "execution-fills-v4";
+export const BACKFILL_NAME = "execution-fills-v6";
 /** Executions logged live with order data (v0.1.7+) are newer than this; everything older is reconstructed. */
 export const LIVE_FILLS_SINCE = Date.UTC(2026, 9, 17, 0, 0, 0);
 /** A reconstructed match is rejected if its BTC cost is off from the logged BTC moved by more than this factor. */
@@ -66,8 +66,8 @@ export async function backfillExecutionFills(params: {
       const from = all[0]!.timestamp - PRE_MS;
       const to = Math.max(candidates.length ? candidates[candidates.length - 1]!.timestamp + MAX_WINDOW_MS : 0, LIVE_FILLS_SINCE);
       [usdtAll, directAll, btcAll] = await Promise.all([
-        client.getTradeFills(pair.assetUsdtSymbol, from, to),
-        client.getTradeFills(pair.ratioSymbol, from, to),
+        client.getTradeFills(pair.assetUsdtSymbol, from, to, pair.assetCurrency),
+        client.getTradeFills(pair.ratioSymbol, from, to, pair.assetCurrency),
         client.getTradeFills(pair.btcUsdtSymbol, from, to),
       ]);
     } catch (err) {
@@ -76,6 +76,24 @@ export async function backfillExecutionFills(params: {
     console.log(
       `[backfill] ${pair.key}: ${usdtAll.length} ${pair.assetUsdtSymbol} orders, ${directAll.length} ${pair.ratioSymbol} orders, ${btcAll.length} ${pair.btcUsdtSymbol} orders in history for ${candidates.length} executions.`
     );
+
+    // Reconciliation: everything the exchange says was bought/sold on this asset since the first logged
+    // execution, versus the live wallet. A gap means the history/log is incomplete (or something was
+    // deposited/withdrawn). Logged only; no data is changed.
+    try {
+      const orders = [...usdtAll, ...directAll].filter((o) => o.filled > 0);
+      const bought = orders.filter((o) => o.side === "buy").reduce((s, o) => s + o.filled, 0);
+      const sold = orders.filter((o) => o.side === "sell").reduce((s, o) => s + o.filled, 0);
+      const fees = orders.reduce((s, o) => s + o.feeBase, 0); // negative = paid in the asset
+      const wallets = await client.getWallets();
+      const held = wallets.find((w) => w.currency === pair.assetCurrency)?.balance ?? 0;
+      const net = bought - sold + fees;
+      console.log(
+        `[backfill] ${pair.key} reconcile: bought ${bought.toFixed(4)} - sold ${sold.toFixed(4)} + fees ${fees.toFixed(4)} = ${net.toFixed(4)} ${pair.assetCurrency} from exchange history vs ${held.toFixed(4)} in wallet (difference ${(held - net).toFixed(4)}).`
+      );
+    } catch (err) {
+      console.warn(`[backfill] ${pair.key} reconcile skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     for (const e of candidates) {
       const sideBuy = e.side === "sell_btc_for_xaut"; // entering the asset = buying it
@@ -163,6 +181,7 @@ export async function backfillExecutionFills(params: {
     ]
       .filter((x) => x.o.side === "buy" && x.o.filled > 0 && x.o.avgPrice > 0 && !used.has(x.o.orderId) && x.o.firstAt < LIVE_FILLS_SINCE)
       .sort((a, b) => a.o.firstAt - b.o.firstAt);
+    const recoveredRatios: Array<{ firstAt: number; lastAt: number; ratio: number }> = [];
     const clusters: (typeof leftovers)[] = [];
     for (const x of leftovers) {
       const cur = clusters[clusters.length - 1];
@@ -219,6 +238,7 @@ export async function backfillExecutionFills(params: {
         orders: JSON.stringify(fills),
       });
       executionsUpdated++;
+      recoveredRatios.push({ firstAt, lastAt, ratio: base / costBtc });
       console.log(`[backfill] ${pair.key}: recovered ${fills.length} unlogged buys (${base.toFixed(4)} ${pair.assetCurrency}, $${costUsd.toFixed(0)}) at ${new Date(firstAt).toISOString()}.`);
     }
 
@@ -226,10 +246,37 @@ export async function backfillExecutionFills(params: {
     // fill converted at the BTC/USDT price of its own minute.
     const flipExec = (ts: number | undefined): ExecutionLogEntry | undefined =>
       ts === undefined ? undefined : all.find((x) => x.id === `${pair.key}-${ts}-flip`);
-    const ratioFor = (x: ExecutionLogEntry | undefined): number | undefined => (x ? ratioByExec.get(x.id) : undefined);
+    // A flip whose orders couldn't be matched to its own row (e.g. it was recovered as a separate cluster)
+    // still gets its real price from the recovered cluster that starts within its window.
+    const ratioFor = (x: ExecutionLogEntry | undefined, ts: number | undefined): number | undefined => {
+      const direct = x ? ratioByExec.get(x.id) : undefined;
+      if (direct !== undefined || ts === undefined) return direct;
+      return recoveredRatios.find((r) => r.firstAt >= ts - PRE_MS && r.firstAt <= ts + MAX_WINDOW_MS)?.ratio;
+    };
+    // Signal prices like-for-like with TradingView: it fills a signal at the NEXT bar's open, so restate
+    // each trade's signal price as the open of the UTC daily bar it executed in (asset-per-BTC convention).
+    try {
+      const dayOpen = new Map<number, number>();
+      for (const c of await client.getCandles(pair.ratioSymbol, "1D", 400)) {
+        if (c.open > 0) dayOpen.set(c.timestamp, pair.ratioConvention === "btcPerAsset" ? 1 / c.open : c.open);
+      }
+      const openOn = (ts: number | undefined) => (ts === undefined ? undefined : dayOpen.get(Math.floor(ts / 86_400_000) * 86_400_000));
+      for (const t of repo.getRecentTrades(pair.key, 500)) {
+        if (t.status === "cancelled") continue;
+        const bootstrap = t.notes?.includes("Bootstrap-inferred") === true;
+        const entry = bootstrap ? undefined : openOn(t.openedAt);
+        const exit = openOn(t.closedAt);
+        if (entry !== undefined || exit !== undefined) {
+          repo.setTradeSignalPrices(t.id, { ...(entry !== undefined ? { entry } : {}), ...(exit !== undefined ? { exit } : {}) });
+        }
+      }
+    } catch (err) {
+      console.warn(`[backfill] ${pair.key}: signal price restatement skipped (${err instanceof Error ? err.message : String(err)}).`);
+    }
     for (const t of repo.getRecentTrades(pair.key, 500)) {
-      const entry = t.actualEntryPrice === undefined ? ratioFor(flipExec(t.openedAt)) : undefined;
-      const exit = t.actualExitPrice === undefined && t.closedAt !== undefined ? ratioFor(flipExec(t.closedAt)) : undefined;
+      // A trade's entry is the flip OUT of the asset (sells, never recovered); its exit is the flip INTO it (buys).
+      const entry = t.actualEntryPrice === undefined ? ratioByExec.get(flipExec(t.openedAt)?.id ?? "") : undefined;
+      const exit = t.actualExitPrice === undefined && t.closedAt !== undefined ? ratioFor(flipExec(t.closedAt), t.closedAt) : undefined;
       if (entry !== undefined || exit !== undefined) {
         repo.setTradeActualPrices(t.id, {
           ...(entry !== undefined ? { entry } : {}),
