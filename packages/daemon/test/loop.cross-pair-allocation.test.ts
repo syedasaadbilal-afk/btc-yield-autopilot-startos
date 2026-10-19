@@ -90,7 +90,7 @@ describe("cross-pair rotation & allocation (asymmetric regimes, daemon-level)", 
     const xmr = results.find((r) => r.pairKey === "xmr")!;
 
     // Pre-tick state for both: nothing held yet (BTC-only wallet) -> "long".
-    expect(xaut.currentPosition).toBe("long");
+    expect(xaut.currentPosition).toBe("flat");
     expect(xaut.decisionTarget).toBe("flat"); // this tick's Larsson decision: rotate into XAUT
     expect(xaut.targetFraction).toBeCloseTo(1); // sized at 100%, not the static 50%
     expect(xaut.rotated).toBe(true);

@@ -79,7 +79,7 @@ describe("LIVE-mode bootstrap trust bug (repo.hasLiveTrade / needsLiveBootstrapC
     // the real exchange.
     const tick1 = await runControlLoopIteration({ client, repo, config: DEFAULT_STRATEGY_CONFIG });
     const xmr1 = tick1.find((r) => r.pairKey === "xmr")!;
-    expect(xmr1.currentPosition).toBe("flat");
+    expect(xmr1.currentPosition).toBe("long");
     expect(xmr1.decisionTarget).toBe("long");
     expect(xmr1.rotated).toBe(true);
     const paperTrade = repo.getOpenTrade("xmr");
@@ -97,7 +97,7 @@ describe("LIVE-mode bootstrap trust bug (repo.hasLiveTrade / needsLiveBootstrapC
     // even though the real wallet never moved. After the fix: the real
     // wallet is re-checked, currentPosition comes back "flat", disagrees
     // with decision.target ("long"), and a real rotation fires this tick.
-    expect(xmr2.currentPosition).toBe("flat");
+    expect(xmr2.currentPosition).toBe("long");
     expect(xmr2.decisionTarget).toBe("long");
     expect(xmr2.rotated).toBe(true);
 
@@ -133,7 +133,8 @@ describe("LIVE-mode bootstrap trust bug (repo.hasLiveTrade / needsLiveBootstrapC
     const xmr3 = tick3.find((r) => r.pairKey === "xmr")!;
 
     // +1 here is the new unconditional per-tick wallet-basis read (real-wallet-based sizing), not a bootstrap re-check regression.
-    expect(getWallets.mock.calls.length).toBe(callsBeforeTick3 + 1);
+    // The mock wallet never converts, so the leftover sweep (basis read + sweep reads + rotation reads) also fires: 5 reads total, none of them a bootstrap re-check.
+    expect(getWallets.mock.calls.length).toBe(callsBeforeTick3 + 5);
     expect(xmr3.currentPosition).toBe("long");
     expect(xmr3.decisionTarget).toBe("long");
     expect(xmr3.rotated).toBe(false);

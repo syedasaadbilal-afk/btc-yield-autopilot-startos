@@ -164,6 +164,48 @@ export async function sellHoldingForUsdt(params: {
   return raised;
 }
 
+/**
+ * Buys BTC with up to `usdtAmount` of idle USDT via the BTC/USDT pair, in chunks of
+ * `chunkUsd`, one limit order at a time. Returns BTC bought and USD spent (at the
+ * limit price, an upper bound). Never throws; stops on a partial fill or error.
+ */
+export async function buyBtcWithUsdt(params: {
+  client: BitfinexRestClient;
+  pairKey: string;
+  symbol: string;
+  usdtAmount: number;
+  chunkUsd: number;
+  fillTimeoutMs?: number;
+  pollIntervalMs?: number;
+}): Promise<{ btc: number; spentUsd: number; avgPrice: number }> {
+  const { client, symbol, chunkUsd } = params;
+  const opts = { pairKey: params.pairKey, fillTimeoutMs: params.fillTimeoutMs ?? 15 * 60_000, pollIntervalMs: params.pollIntervalMs ?? 5_000 };
+  let btc = 0;
+  let spent = 0;
+  let notional = 0;
+  try {
+    const candle = await client.getCandles(symbol, "1D", 1);
+    const price = candle[0]?.close ?? 0;
+    if (price <= 0) return { btc: 0, spentUsd: 0, avgPrice: 0 };
+    const minOrder = await client.getMinOrderSize(symbol);
+    const buyPx = Number(marketableLimitPrice(price, "buy", 0.005));
+    let leftUsd = params.usdtAmount;
+    while (leftUsd > 1) {
+      const baseAmt = Math.min(chunkUsd, leftUsd) / buyPx;
+      if (baseAmt <= 0 || baseAmt < minOrder) break;
+      const r = await placeLimitAndWait(client, opts, symbol, "buy", Number(baseAmt.toFixed(8)), buyPx);
+      btc += r.filled;
+      spent += r.filled * buyPx;
+      notional += r.filled * r.avgPrice;
+      leftUsd -= r.filled * buyPx;
+      if (r.filled < baseAmt * 0.999) break;
+    }
+  } catch (err) {
+    console.error(`[${params.pairKey}] USDT->BTC sweep via ${symbol} interrupted: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return { btc, spentUsd: spent, avgPrice: btc > 0 ? notional / btc : 0 };
+}
+
 const BUFFER_FRACTION = 0.01;
 const BUFFER_LIMIT = 0.005;
 

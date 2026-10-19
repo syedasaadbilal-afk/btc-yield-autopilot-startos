@@ -1,5 +1,5 @@
 import { Fragment } from "react";
-import { deriveAssetHolds, type ExecutionLogEntry, type Trade } from "@autopilot/shared";
+import { deriveAssetHolds, type AssetHold, type ExecutionLogEntry, type Trade } from "@autopilot/shared";
 import { formatBtcAmount, type DisplayUnit } from "../format.js";
 
 function formatReturn(pnl: number | undefined, capital: number): string {
@@ -96,6 +96,45 @@ function positionCost(
   return amount > 0 ? { avgBtc: cost / amount, amount, buys } : undefined;
 }
 
+/**
+ * Closed holds: replace the entry price with the real average cost of every buy during the hold
+ * (entry flip + top-ups + resizes) and the exit price with the real average sell price, then compute
+ * PnL on the units actually sold: units x (exit - avg cost), return = exit / avg cost - 1. Falls back
+ * to the original (actual/signal price) figures when fill data is missing. The signal-based PnL stays
+ * available for comparison.
+ */
+function refineHold(h: AssetHold, executions: ExecutionLogEntry[] | undefined): AssetHold {
+  if (!executions || h.entryAt === undefined || h.exitAt === undefined) return h;
+  let amount = 0;
+  let cost = 0;
+  for (const e of executions) {
+    if (e.side !== "sell_btc_for_xaut" || e.status !== "executed" || !e.assetAmount || !e.avgPriceBtc) continue;
+    if (e.timestamp < h.entryAt - 120_000 || e.timestamp >= h.exitAt) continue;
+    amount += e.assetAmount;
+    cost += e.assetAmount * e.avgPriceBtc;
+  }
+  let sold = 0;
+  let proceeds = 0;
+  for (const e of executions) {
+    if (e.kind !== "flip_exit" || e.status !== "executed" || !e.assetAmount || !e.avgPriceBtc) continue;
+    if (Math.abs(e.timestamp - h.exitAt) > 120_000) continue;
+    sold += e.assetAmount;
+    proceeds += e.assetAmount * e.avgPriceBtc;
+  }
+  if (amount <= 0 || sold <= 0) return h;
+  const avgCost = cost / amount;
+  const exitBtc = proceeds / sold;
+  return {
+    ...h,
+    actualEntryPrice: 1 / avgCost,
+    actualExitPrice: 1 / exitBtc,
+    size: sold * avgCost,
+    pnl: sold * (exitBtc - avgCost),
+    pnlBasis: "actual",
+    ...(h.signalPnl === undefined && h.pnl !== undefined ? { signalPnl: h.pnl } : {}),
+  };
+}
+
 const fmtPct = (p: number) => `${p >= 0 ? "+" : ""}${p.toFixed(2)}%`;
 
 export function PositionsTable({
@@ -116,7 +155,7 @@ export function PositionsTable({
   /** Latest asset-per-BTC ratio, for the open trade's unrealized return. */
   currentRatio?: number | null;
 }) {
-  const holds = deriveAssetHolds(trades);
+  const holds = deriveAssetHolds(trades).map((h) => refineHold(h, executions));
   if (holds.length === 0) {
     return <div className="text-sm text-slate-500 py-4">No trades yet.</div>;
   }

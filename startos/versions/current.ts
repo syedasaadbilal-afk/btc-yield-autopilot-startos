@@ -1,8 +1,8 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 export const current = VersionInfo.of({
-  version: '0.1.11:0',
+  version: '0.1.13:0',
   releaseNotes: {
-    en_US: 'Signal prices follow the TradingView convention (open of the bar a signal executes in), with a restatement of past trades. The funded baseline and percentage of a pair holding its asset now use the real cost of the units held (average buy price from real fills), so later deposits and top-ups no longer show as profit. The backfill logs an exchange-history reconciliation (bought, sold, fees versus wallet), and the average-cost line shows how much of the held balance it covers. Every filled order is logged the moment it fills, unlogged buys are recovered as labelled rows, and the direct XMR/BTC market is covered.',
+    en_US: 'Fixes the Portfolio NAV double count after an exit and the stale rotation pending status. Adds an optional XAUT entry block (Config tab): no new XAUT entries while BTC is below a chosen multiple of its 4-year SMA, default 1.5x, off by default. Adds a leftover sweep: any asset left after an exit and any idle USDT above the required cash is converted to BTC (USDT is kept when a pair currently wants its asset). Closed trades are now valued on real fills: entry is the average cost of every buy during the hold (entry plus top-ups), exit is the real average sell price, and PnL is computed on the units actually sold, with the signal-based figure shown beneath. The Timeline also shows the BTC leg of an execution (the BTC bought with the proceeds of an exit).',
   },
   migrations: { up: async ({ effects }) => {}, down: IMPOSSIBLE },
 })

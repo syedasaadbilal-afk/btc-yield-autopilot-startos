@@ -26,6 +26,26 @@ function orderSummary(e: ExecutionLogEntry): string | null {
 }
 
 /**
+ * The BTC leg of an execution (BTC bought with the proceeds of an exit, or BTC sold to fund an entry),
+ * read from the per-order list stored with the row. Null when no BTC/USDT order was recorded.
+ */
+function btcLegSummary(e: ExecutionLogEntry): string | null {
+  if (!e.orders) return null;
+  let fills: Array<{ symbol: string; action: "buy" | "sell"; base: number; price: number }>;
+  try {
+    fills = JSON.parse(e.orders);
+  } catch {
+    return null;
+  }
+  const leg = fills.filter((f) => /BTCUST$/.test(f.symbol) && f.base > 0);
+  if (leg.length === 0) return null;
+  const base = leg.reduce((s, f) => s + f.base, 0);
+  const usd = leg.reduce((s, f) => s + f.base * f.price, 0);
+  const verb = leg[0]!.action === "buy" ? "bought" : "sold";
+  return `BTC leg: ${leg.length} × ~$${fmtNum(usd / leg.length, 0)} orders ${verb} ${base.toFixed(6)} BTC (avg $${fmtNum(usd / base, 0)}, total $${fmtNum(usd, 0)})`;
+}
+
+/**
  * Every real execution attempt for a pair - flip entry/exit, cross-pair
  * resizes, idle top-ups - distinct from the Status tab's PositionsTable,
  * which only shows closed round-trip trade PnL. This is where a resize like
@@ -58,6 +78,7 @@ export function ExecutionsTable({ executions, unit }: { executions: ExecutionLog
             <td className="py-1.5 pr-3">{formatBtcAmount(e.requestedBtc, unit)}</td>
             <td className="py-1.5 pr-3">{formatBtcAmount(e.movedBtc, unit)}</td>
             <td className="py-1.5 pr-3 text-slate-500">{orderSummary(e) ?? (e.routes || "-")}
+                    {btcLegSummary(e) && <div className="text-slate-400">{btcLegSummary(e)}</div>}
                     {e.routes === "recovered" && <span className="ml-1 text-amber-400/80">(recovered from exchange history - not logged by the bot at the time)</span>}
                     {e.routes === "in-progress" && <span className="ml-1 text-sky-400/80">(run interrupted or still in progress)</span>}</td>
             <td className="py-1.5 pr-3">

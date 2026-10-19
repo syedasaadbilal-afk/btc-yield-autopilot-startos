@@ -471,6 +471,22 @@ export class Repo {
       .run(usdt, Date.now());
   }
 
+  getXautSmaGate(): { enabled: boolean; threshold: number } {
+    const row = this.db.prepare("SELECT enabled, threshold FROM xaut_sma_gate WHERE id = 1").get() as
+      | { enabled: number; threshold: number }
+      | undefined;
+    return { enabled: row ? row.enabled === 1 : false, threshold: row?.threshold ?? 1.5 };
+  }
+
+  setXautSmaGate(enabled: boolean, threshold: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO xaut_sma_gate (id, enabled, threshold, updated_at) VALUES (1, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, threshold = excluded.threshold, updated_at = excluded.updated_at`
+      )
+      .run(enabled ? 1 : 0, threshold, Date.now());
+  }
+
   getChunkUsd(configDefaultUsd: number): number {
     const row = this.db.prepare("SELECT chunk_usd FROM chunk_size WHERE id = 1").get() as { chunk_usd: number } | undefined;
     return row?.chunk_usd ?? configDefaultUsd;

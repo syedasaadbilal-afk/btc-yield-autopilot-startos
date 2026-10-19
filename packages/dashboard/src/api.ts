@@ -180,6 +180,32 @@ export async function saveChunkUsd(chunkUsd: number): Promise<boolean> {
   }
 }
 
+export interface XautSmaGate {
+  enabled: boolean;
+  threshold: number;
+  multiple: number | null;
+  btcUsd: number | null;
+  sma: number | null;
+  blocking: boolean;
+}
+
+export async function fetchXautSmaGate(): Promise<XautSmaGate | undefined> {
+  return getJson<XautSmaGate>("/api/xaut-sma-gate");
+}
+
+export async function saveXautSmaGate(enabled: boolean, threshold: number): Promise<boolean> {
+  try {
+    const res = await fetch("/api/xaut-sma-gate", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled, threshold }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchCashReserve(): Promise<number> {
   return (await getJson<{ usdt: number }>("/api/cash-reserve"))?.usdt ?? 0;
 }

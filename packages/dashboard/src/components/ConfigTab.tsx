@@ -6,6 +6,9 @@ import {
   fetchDeployCap,
   fetchChunkUsd,
   fetchCashReserve,
+  fetchXautSmaGate,
+  saveXautSmaGate,
+  type XautSmaGate,
   saveCashReserve,
   saveChunkUsd,
   saveAllocationOverride,
@@ -225,6 +228,82 @@ function DeployCap() {
   );
 }
 
+function XautSmaSwitch() {
+  const [info, setInfo] = useState<XautSmaGate | undefined>(undefined);
+  const [enabled, setEnabled] = useState(false);
+  const [threshold, setThreshold] = useState("1.5");
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState<string | undefined>(undefined);
+
+  const load = () =>
+    fetchXautSmaGate().then((g) => {
+      if (!g) return;
+      setInfo(g);
+      setEnabled(g.enabled);
+      setThreshold(String(g.threshold));
+    });
+  useEffect(() => {
+    load();
+  }, []);
+
+  const parsed = Number(threshold);
+  const valid = Number.isFinite(parsed) && parsed > 0 && parsed <= 20;
+
+  async function handleSave() {
+    if (!valid) return;
+    setSaving(true);
+    const ok = await saveXautSmaGate(enabled, parsed);
+    setSaving(false);
+    setNote(ok ? "Saved. Takes effect on the next tick (click Run decision now to apply immediately)." : "Failed to save - check the daemon is reachable.");
+    if (ok) load();
+  }
+
+  return (
+    <ConfigSection title="XAUT entry block (BTC 4-year SMA)">
+      <div className="space-y-2">
+        <div className="text-sm text-slate-300">
+          BTC / SMA(1458d):{" "}
+          <span className="font-semibold">{info?.multiple != null ? `${info.multiple.toFixed(2)}x` : "n/a"}</span>
+          {info?.enabled && info.multiple != null && (
+            <span className={`ml-2 text-xs ${info.blocking ? "text-amber-400" : "text-emerald-400"}`}>
+              {info.blocking ? "XAUT entries blocked" : "XAUT entries allowed"}
+            </span>
+          )}
+        </div>
+        <label className="flex items-center gap-2 text-sm text-slate-400">
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+          Block new XAUT entries below the threshold
+        </label>
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-slate-400">Threshold (x SMA)</span>
+          <input
+            type="number"
+            min={0.1}
+            max={20}
+            step={0.05}
+            value={threshold}
+            onChange={(e) => setThreshold(e.target.value)}
+            className="w-24 bg-ink-950 border border-slate-800 rounded px-2 py-1.5 text-sm text-slate-200"
+          />
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={saving || !valid}
+          className="px-3 py-1.5 rounded text-sm font-medium bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-50 border border-slate-700"
+        >
+          {saving ? "Saving..." : "Save XAUT entry block"}
+        </button>
+        {note && <p className="text-xs text-amber-400">{note}</p>}
+        <p className="text-xs text-slate-600">
+          Backtest since 2017: XAUT entries below about 1.5x BTC's 4-year average lost money (about 21% win rate), above
+          it about 71%. While blocked, no new XAUT position is opened and XMR gets the capital instead. An XAUT position
+          already open runs to its own exit; nothing is sold early.
+        </p>
+      </div>
+    </ConfigSection>
+  );
+}
+
 function CashReserve() {
   const [usdt, setUsdt] = useState("0");
   const [saving, setSaving] = useState(false);
@@ -365,6 +444,7 @@ export function ConfigTab() {
         <DeployCap />
         <ChunkSize />
         <CashReserve />
+        <XautSmaSwitch />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

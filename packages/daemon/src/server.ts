@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { DEFAULT_STRATEGY_CONFIG, RUN_MODES, type RunMode } from "@autopilot/shared";
 import type { Repo } from "./db/repo.js";
 import type { PairLoopResult } from "./loop.js";
+import { getLastBtcSma } from "./btcSmaGate.js";
 import { hasBitfinexSecrets, writeBitfinexSecrets, readBitfinexSecrets } from "./secrets.js";
 import { BitfinexRestClient } from "@autopilot/bitfinex-client";
 
@@ -359,6 +360,31 @@ export async function createServer(opts: CreateServerOptions) {
     opts.repo.setCashReserveUsd(usdt);
     console.log(`[autopilot] required cash changed via dashboard -> $${usdt} USDT`);
     return { usdt };
+  });
+
+  // Optional XAUT entry block by BTC 4-year SMA multiple.
+  fastify.get("/api/xaut-sma-gate", async () => {
+    const g = opts.repo.getXautSmaGate();
+    const r = getLastBtcSma();
+    return {
+      enabled: g.enabled,
+      threshold: g.threshold,
+      multiple: r?.multiple ?? null,
+      btcUsd: r?.btcUsd ?? null,
+      sma: r?.sma ?? null,
+      blocking: g.enabled && r !== undefined && r.multiple < g.threshold,
+    };
+  });
+
+  fastify.put("/api/xaut-sma-gate", async (req, reply) => {
+    const body = req.body as { enabled?: boolean; threshold?: number } | undefined;
+    if (typeof body?.enabled !== "boolean" || typeof body.threshold !== "number" || !Number.isFinite(body.threshold) || body.threshold <= 0 || body.threshold > 20) {
+      reply.code(400);
+      return { error: "enabled must be boolean, threshold a number in (0, 20]" };
+    }
+    opts.repo.setXautSmaGate(body.enabled, body.threshold);
+    console.log(`[autopilot] XAUT SMA gate changed via dashboard -> enabled=${body.enabled}, threshold=${body.threshold}`);
+    return { enabled: body.enabled, threshold: body.threshold };
   });
 
   // Phased-order chunk size (USD per limit order, one open at a time).

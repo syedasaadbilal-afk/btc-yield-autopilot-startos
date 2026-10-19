@@ -12,7 +12,8 @@ import {
 import type { BitfinexRestClient } from "@autopilot/bitfinex-client";
 import type { Repo } from "./db/repo.js";
 import { gate } from "./gate.js";
-import { actualRatioFromFills, executeRotation, sellHoldingForUsdt, summarizeFills, type OrderFill } from "./execute.js";
+import { refreshBtcSma } from "./btcSmaGate.js";
+import { actualRatioFromFills, buyBtcWithUsdt, executeRotation, sellHoldingForUsdt, summarizeFills, type OrderFill } from "./execute.js";
 
 /**
  * Crash-safe progress logging: after each filled order, upsert this execution's
@@ -248,8 +249,25 @@ async function observeAndDecide(deps: LoopDeps & { pair: PairConfig }): Promise<
   const openTradeAfterReconciliation = repo.getOpenTrade(pair.key);
 
   const rotationHistory = replayLarssonRotation(larssonInputCandles, config.larsson, "long");
-  const today = rotationHistory[rotationHistory.length - 1]!;
+  let today = rotationHistory[rotationHistory.length - 1]!;
   repo.insertLarssonDecision(pair.key, today);
+
+  // Optional XAUT entry block (Oct 2026): while BTC's price / 4-year SMA is below the
+  // threshold, do not OPEN a new XAUT position. An already-held position runs to its own
+  // exit. The pair is then treated as not-gold for sizing too, so XMR gets the capital.
+  if (pair.key === "xaut") {
+    const smaGate = repo.getXautSmaGate();
+    const reading = await refreshBtcSma(client, now);
+    if (smaGate.enabled && reading && currentPosition === "long" && today.position === "flat" && reading.multiple < smaGate.threshold) {
+      today = {
+        ...today,
+        regime: "gray",
+        position: "long",
+        switched: false,
+        reason: `XAUT entry blocked: BTC is ${reading.multiple.toFixed(2)}x its 4-year SMA, below the ${smaGate.threshold} threshold. Holding BTC.`,
+      };
+    }
+  }
 
   if (today.position !== currentPosition && !today.switched) {
     console.warn(
@@ -984,7 +1002,10 @@ async function gateAndExecute(
 
   return {
     pairKey: pair.key,
-    currentPosition,
+    // Position AFTER this tick's execution (live Oct 2026: returning the
+    // pre-rotation position left the dashboard showing "rotation pending" and
+    // counting the pair's NAV twice after an exit until the next tick).
+    currentPosition: rotated && decision.target !== currentPosition ? decision.target : currentPosition,
     decisionTarget: decision.target,
     gateAllowed: gateResult.allow,
     gateReason: gateResult.reason,
@@ -1198,5 +1219,102 @@ export async function runControlLoopIteration(deps: LoopDeps): Promise<PairLoopR
     }
   }
 
+  try {
+    await sweepLeftovers(deps, observations, results);
+  } catch (err) {
+    console.error("[sweep] leftover sweep failed:", err);
+  }
+
   return results;
+}
+
+/**
+ * Leftover sweep (LIVE only). After a pair has exited to BTC, an exit that stopped
+ * early (partial fill, 1% size buffer, failed USDT->BTC buy) used to leave asset
+ * units and idle USDT behind with nothing retrying them. Each tick:
+ *  - a pair now in BTC that still holds its asset above the dust threshold sells it to BTC;
+ *  - USDT above the operator's required cash is bought into BTC, unless some pair currently
+ *    wants its asset (entries / top-ups spend idle USDT first).
+ */
+async function sweepLeftovers(deps: LoopDeps, observations: PairObservation[], results: PairLoopResult[]): Promise<void> {
+  const { client, repo, config } = deps;
+  if (repo.getRunMode() !== "LIVE" || observations.length === 0) return;
+  const now = deps.now ?? Date.now();
+  const posOf = (o: PairObservation): PositionState =>
+    results.find((r) => r.pairKey === o.pair.key)?.currentPosition ?? o.currentPosition;
+  const failed = (o: PairObservation) => !!results.find((r) => r.pairKey === o.pair.key)?.error;
+
+  const wallets = await client.getWallets();
+  const btcSymbol = observations[0]!.pair.btcUsdtSymbol;
+  const btcUsd = (await client.getCandles(btcSymbol, "1D", 1))[0]?.close ?? 0;
+  if (!(btcUsd > 0)) return;
+  const chunkUsd = repo.getChunkUsd(config.execution.chunkUsd ?? 10_000);
+  const reserveUsd = repo.getCashReserveUsd();
+
+  const btcWallet = wallets.find((w) => w.currency === "BTC")?.balance ?? 0;
+  const usdtWallet = wallets.filter((w) => w.currency === "UST" || w.currency === "USDT").reduce((s, w) => s + w.balance, 0);
+  let totalBtc = btcWallet + usdtWallet / btcUsd;
+  for (const o of observations) {
+    totalBtc += (wallets.find((w) => w.currency === o.pair.assetCurrency)?.balance ?? 0) * o.btcPerAssetPrice;
+  }
+  const dustBtc = totalBtc * 0.001;
+  let sweptAny = false;
+
+  for (const o of observations) {
+    if (posOf(o) !== "long" || failed(o)) continue;
+    const units = wallets.find((w) => w.currency === o.pair.assetCurrency)?.availableBalance ?? 0;
+    const valueBtc = units * o.btcPerAssetPrice;
+    if (valueBtc <= dustBtc) continue;
+    console.log(`[sweep] ${o.pair.key}: ${units} ${o.pair.assetCurrency} left over in BTC state (~${valueBtc.toFixed(8)} BTC) - selling to BTC.`);
+    const id = `${o.pair.key}-${now}-sweep`;
+    const res = await executeRotation({
+      client,
+      side: "buy_btc_with_xaut",
+      btcCapital: valueBtc,
+      pair: o.pair,
+      config,
+      chunkUsd,
+      reserveUsd,
+      onFill: progressLogger(repo, o.pair, { id, timestamp: now, kind: "resize", side: "buy_btc_with_xaut", requestedBtc: valueBtc }),
+    });
+    if (res.totalBtcMoved > 0) {
+      sweptAny = true;
+      repo.insertExecutionLog({
+        id,
+        pairKey: o.pair.key,
+        timestamp: now,
+        kind: "resize",
+        side: "buy_btc_with_xaut",
+        requestedBtc: valueBtc,
+        movedBtc: res.totalBtcMoved,
+        status: "executed",
+        routes: "sweep",
+        ...fillFields(res.fills, o.pair.assetUsdtSymbol, o.pair.btcUsdtSymbol, res.btcUsdtPrice),
+      });
+    }
+  }
+
+  // USDT: keep required cash; keep everything if any pair wants its asset.
+  const wantsAsset = observations.some((o) => o.today.position === "flat");
+  if (wantsAsset) return;
+  const w2 = sweptAny ? await client.getWallets() : wallets;
+  const usdtAvail = w2.filter((x) => x.currency === "UST" || x.currency === "USDT").reduce((s, x) => s + x.availableBalance, 0);
+  const surplusUsd = (usdtAvail - reserveUsd) * 0.995;
+  if (surplusUsd < Math.max(10, dustBtc * btcUsd)) return;
+  const owner = observations.find((o) => posOf(o) === "long") ?? observations[0]!;
+  console.log(`[sweep] idle USDT $${usdtAvail.toFixed(2)} (required cash $${reserveUsd.toFixed(2)}): buying BTC with $${surplusUsd.toFixed(2)}.`);
+  const r = await buyBtcWithUsdt({ client, pairKey: owner.pair.key, symbol: btcSymbol, usdtAmount: surplusUsd, chunkUsd });
+  if (r.btc > 0) {
+    repo.insertExecutionLog({
+      id: `${owner.pair.key}-${now}-usdtsweep`,
+      pairKey: owner.pair.key,
+      timestamp: now,
+      kind: "resize",
+      side: "buy_btc_with_xaut",
+      requestedBtc: surplusUsd / btcUsd,
+      movedBtc: r.btc,
+      status: "executed",
+      routes: "usdt-sweep",
+    });
+  }
 }
