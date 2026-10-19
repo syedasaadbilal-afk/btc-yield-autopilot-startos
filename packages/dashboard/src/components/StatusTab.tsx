@@ -1,5 +1,6 @@
+import { useEffect, useState } from "react";
 import type { NavPoint, RunMode } from "@autopilot/shared";
-import type { StatusResponse } from "../api.js";
+import { fetchXautSmaGate, type StatusResponse, type XautSmaGate } from "../api.js";
 import { formatBtcAmount, formatCountdown, type DisplayUnit } from "../format.js";
 import { RunModeToggle } from "./RunModeToggle.js";
 import { MetricTile } from "./MetricTile.js";
@@ -102,9 +103,12 @@ export function StatusTab({
       {/* Hero: matches Hashrate Autopilot's green PRICE/DELIVERED panel + status/action panel */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="bg-emerald-950/40 border border-emerald-900 rounded-lg p-5 space-y-4">
-          <div>
-            <div className="text-[11px] tracking-wider text-slate-500 uppercase mb-1">Portfolio NAV</div>
-            <div className="text-4xl font-bold text-slate-100">{formatBtcAmount(totalNav, unit)}</div>
+          <div className="flex flex-wrap justify-between gap-6">
+            <div>
+              <div className="text-[11px] tracking-wider text-slate-500 uppercase mb-1">Portfolio NAV</div>
+              <div className="text-4xl font-bold text-slate-100">{formatBtcAmount(totalNav, unit)}</div>
+            </div>
+            <BtcSmaTile />
           </div>
           {/* BTC capital currently deployed per pair (last actual rebalancing
               result, not a target %) - always sums exactly to Portfolio NAV
@@ -231,6 +235,36 @@ export function StatusTab({
           />
         ))}
         <PortfolioPnl status={status} unit={unit} />
+      </div>
+    </div>
+  );
+}
+
+
+/** BTC price vs its 4-year (1458-day) SMA, plus the state of the optional XAUT entry block. */
+function BtcSmaTile() {
+  const [g, setG] = useState<XautSmaGate | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    const load = () => fetchXautSmaGate().then((r) => live && setG(r));
+    load();
+    const id = setInterval(load, 60_000);
+    return () => {
+      live = false;
+      clearInterval(id);
+    };
+  }, []);
+  if (!g || g.multiple === null) return null;
+  const usd = (n: number | null) => (n === null ? "-" : `$${Math.round(n).toLocaleString()}`);
+  return (
+    <div className="text-right">
+      <div className="text-[11px] tracking-wider text-slate-500 uppercase mb-1">BTC / SMA 1458d</div>
+      <div className="text-3xl font-bold text-slate-100">{g.multiple.toFixed(2)}x</div>
+      <div className="text-xs text-slate-400 mt-1 font-mono">
+        BTC {usd(g.btcUsd)} · SMA {usd(g.sma)}
+      </div>
+      <div className={`text-xs mt-1 ${!g.enabled ? "text-slate-500" : g.blocking ? "text-amber-400" : "text-emerald-400"}`}>
+        {!g.enabled ? "XAUT entry block off" : g.blocking ? `XAUT entries blocked (< ${g.threshold}x)` : `XAUT entries allowed (>= ${g.threshold}x)`}
       </div>
     </div>
   );

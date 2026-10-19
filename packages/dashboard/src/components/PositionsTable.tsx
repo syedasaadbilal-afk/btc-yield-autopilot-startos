@@ -238,7 +238,12 @@ export function PositionsTable({
                   </td>
                   <td rowSpan={2} className={`py-1.5 pr-3 align-top ${t.pnl !== undefined ? pnlColor : uColor}`}>
                     {t.pnl !== undefined ? (
-                      formatReturn(t.pnl, t.size ?? 0)
+                      <>
+                        {formatReturn(t.pnl, t.size ?? 0)}
+                        {t.pnlBasis === "actual" && t.entryPrice && t.exitPrice && t.entryPrice > 0 && t.exitPrice > 0 && (
+                          <div className="text-[10px] text-slate-500">signal {fmtPct((t.entryPrice / t.exitPrice - 1) * 100)}</div>
+                        )}
+                      </>
                     ) : u !== undefined ? (
                       <>
                         {fmtPct(u)}
